@@ -45,6 +45,11 @@ class Decision:
     tool_calls: tuple[ToolCall, ...] = ()
     content: str = ""
 
+    def __post_init__(self) -> None:
+        # Accept str inputs from legacy callers / deserialized state.
+        if not isinstance(self.kind, DecisionKind):
+            object.__setattr__(self, "kind", DecisionKind(self.kind))
+
     @classmethod
     def call_tool(cls, name: str, args: Optional[Mapping[str, Any]] = None) -> "Decision":
         return cls(
@@ -73,13 +78,21 @@ class Decision:
 
 @dataclass(frozen=True)
 class ToolResult:
+    """Result of a tool invocation.
+
+    Field order matches the original ``(tool_name, ok, output, error)`` positional
+    contract used by tool handlers. Newer fields (``duration_ms``, ``attempts``,
+    ``call_id``) come last and all have defaults so handlers can keep using
+    positional construction without binding new fields by accident.
+    """
+
     tool_name: str
-    call_id: str = ""
     ok: bool = True
     output: Any = None
     error: str = ""
     duration_ms: float = 0.0
     attempts: int = 1
+    call_id: str = ""
 
 
 @dataclass(frozen=True)

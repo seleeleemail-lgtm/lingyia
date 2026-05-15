@@ -300,6 +300,28 @@ class NewlyCoveredPathTests(unittest.TestCase):
         self.assertTrue(len(round_tripped["observations"]) >= 1)
 
 
+class BackwardCompatTests(unittest.TestCase):
+    """Lock in compatibility surfaces that round-3 review flagged."""
+
+    def test_tool_result_positional_args_preserve_legacy_order(self):
+        # (tool_name, ok, output, error) — the historical positional contract.
+        r = ToolResult("echo", False, None, "boom")
+        self.assertEqual(r.tool_name, "echo")
+        self.assertFalse(r.ok)
+        self.assertEqual(r.error, "boom")
+        # New trailing fields default to zero/empty so they cannot silently
+        # absorb a positional argument meant for ``ok``.
+        self.assertEqual(r.attempts, 1)
+        self.assertEqual(r.call_id, "")
+        self.assertEqual(r.duration_ms, 0.0)
+
+    def test_decision_accepts_string_kind(self):
+        # Older callers or deserialized state may still pass kind as a str.
+        d = Decision(kind="final_answer", content="hello")  # type: ignore[arg-type]
+        self.assertEqual(d.kind.value, "final_answer")
+        self.assertEqual(d.content, "hello")
+
+
 class ExecutorPolicyTests(unittest.TestCase):
     def test_tool_timeout_is_enforced(self):
         async def slow(args, ctx):

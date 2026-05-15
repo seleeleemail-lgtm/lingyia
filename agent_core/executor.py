@@ -165,6 +165,10 @@ class ToolExecutor:
                         },
                     ))
                 return final
+            except asyncio.CancelledError:
+                # Cancellation must propagate; do not absorb into a ToolResult
+                # and never retry a cancelled task.
+                raise
             except asyncio.TimeoutError as exc:
                 last_error = exc
                 if on_event:
@@ -182,7 +186,7 @@ class ToolExecutor:
                 if attempt >= retry.max_attempts or not retry.is_retryable(exc):
                     break
                 await self._backoff(retry, attempt)
-            except BaseException as exc:
+            except Exception as exc:
                 last_error = exc
                 if on_event:
                     on_event(TelemetryEvent(

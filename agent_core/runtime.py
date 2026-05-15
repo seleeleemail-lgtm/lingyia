@@ -228,7 +228,10 @@ class Runtime:
 
             try:
                 decision = await self.model.adecide(context, state, harness.tools)
-            except BaseException as exc:
+            except asyncio.CancelledError:
+                # Let cancellation propagate so callers can shut the loop down.
+                raise
+            except Exception as exc:
                 self._emit(state, TelemetryEvent(
                     kind="model_error",
                     iteration=state.iteration,
