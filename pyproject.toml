@@ -54,6 +54,12 @@ opentelemetry = [
 tiktoken = [
     "tiktoken>=0.5",
 ]
+postgres = [
+    "asyncpg>=0.27",
+]
+redis = [
+    "redis>=5.0",
+]
 dev = [
     "pytest>=7",
     "pytest-asyncio>=0.21",
@@ -64,6 +70,8 @@ all = [
     "opentelemetry-api>=1.20",
     "opentelemetry-sdk>=1.20",
     "tiktoken>=0.5",
+    "asyncpg>=0.27",
+    "redis>=5.0",
 ]
 
 [project.urls]

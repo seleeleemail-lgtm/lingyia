@@ -117,7 +117,7 @@ runtime = Runtime.production(
 |---|---|
 | **Async core loop** with parallel tool calls | ✅ |
 | **Pause / resume** with unified `Interrupt` (approval + question) | ✅ |
-| **Cross-process durability** via `SqliteCheckpointer` | ✅ |
+| **Cross-process durability**: `SqliteCheckpointer` / `PostgresCheckpointer` / `RedisCheckpointer` | ✅ |
 | **OpenTelemetry sink** + JSONL + structured logs | ✅ |
 | **Token + cost tracking**, per-run budget, abort on overspend | ✅ |
 | **Token-aware compaction** with pluggable estimator | ✅ |
@@ -126,12 +126,11 @@ runtime = Runtime.production(
 | **Tool permission gating** with allow-list enforcement | ✅ |
 | **PII redaction** for telemetry pipelines | ✅ |
 | **Streaming run events** via `Runtime.astream` | ✅ |
+| **Sub-agent / agent-as-tool** via `sub_agent_tool` | ✅ |
 | **Sandboxed tools** (fs / http / shell with allow-lists) | ✅ |
 | **Multi-provider adapters** (OpenAI / Anthropic / SiliconFlow / MiniMax) | ✅ |
 | **BFCL V3 benchmark runner** for tool-calling accuracy | ✅ |
-| Real OTLP exporter wiring | docs only |
-| Sub-agent / agent-as-tool | roadmap |
-| Postgres / Redis checkpointer | roadmap |
+| **Real OTLP exporter wiring** for Langfuse / Datadog / Tempo / Jaeger | docs: [OTEL_SETUP.md](docs/OTEL_SETUP.md) |
 
 ---
 
@@ -196,11 +195,11 @@ We pin Python 3.9 as the minimum because some real-world environments are still 
 
 ## Roadmap (short)
 
-- PostgresCheckpointer for multi-instance production
 - Inspect AI bridge — open the door to 200+ external benchmarks
 - Reflection / replan pattern alongside ReAct
-- Sub-agent / agent-as-tool composition
-- Streaming tokens (currently we stream events, not token deltas)
+- Streaming token deltas (currently we stream events, not token-level chunks)
+- A first-party `LangfuseSink` shortcut on top of the generic OTel sink
+- More example projects: real legal review, code review, customer support
 
 ---
 

@@ -8,15 +8,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Roadmap
-- PostgresCheckpointer (multi-instance durability)
-- Inspect AI bridge runner
+- Inspect AI bridge runner (200+ external benchmarks)
 - Reflection / replan agent pattern
-- Sub-agent / agent-as-tool composition
-- Real OTLP exporter wiring examples
+- Streaming token deltas (currently event-level only)
+- First-party `LangfuseSink` shortcut
+- Example projects in `examples/` for legal / code / support domains
 
 ## [0.1.0] — 2026-05-15
 
 Initial public release.
+
+### Added (consolidated v0.1.0 scope)
+
+#### New in the final v0.1.0 cut (post-rename additions)
+- `lingyia_kit/checkpointers/postgres.py`: `PostgresCheckpointer` for
+  multi-instance production. JSONB storage, lazy connection pool,
+  table-name validation against SQL injection. Requires
+  `pip install 'lingyia[postgres]'`.
+- `lingyia_kit/checkpointers/redis.py`: `RedisCheckpointer` for fast
+  ephemeral pause/resume. Hash-based storage, optional TTL auto-expiry.
+  Requires `pip install 'lingyia[redis]'`.
+- `lingyia_kit/tools/sub_agent.py`: `sub_agent_tool` factory wrapping a
+  `Runtime + Harness` as a `Tool`. The canonical agent-as-tool pattern.
+  Surfaces sub-agent cost, tokens, status, and run_id on the parent's
+  observation so cross-agent observability stays intact.
+- `docs/OTEL_SETUP.md`: real OpenTelemetry exporter wiring guide
+  covering OTLP gRPC / HTTP, Langfuse, Datadog, with example queries.
+- `README.zh.md`: full Chinese-language README.
+- `pyproject.toml`: new `postgres` and `redis` extras; the `all` extra
+  now installs every optional dependency.
 
 ### Added
 
