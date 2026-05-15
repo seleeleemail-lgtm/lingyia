@@ -347,7 +347,11 @@ class Runtime:
             metadata=dict(state.metadata),
         )
         tasks: list[Any] = []
-        for call in decision.tool_calls:
+        # Preserve call->result alignment so we can attach tool_args to each
+        # observation. The model adapter needs tool_args to rebuild the
+        # assistant turn when replaying conversation history.
+        ordered_calls = list(decision.tool_calls)
+        for call in ordered_calls:
             tool = harness.tool_by_name(call.name)
             if tool is None:
                 tasks.append(_unknown_tool_result(call))
@@ -361,12 +365,13 @@ class Runtime:
                     )
                 )
         results = await asyncio.gather(*tasks)
-        for result in results:
+        for call, result in zip(ordered_calls, results):
             state.add_observation(Observation(
                 iteration=state.iteration,
                 kind="tool_result",
                 payload={
                     "tool_name": result.tool_name,
+                    "tool_args": dict(call.args),
                     "call_id": result.call_id,
                     "ok": result.ok,
                     "output": result.output,
