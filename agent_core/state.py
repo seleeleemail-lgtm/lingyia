@@ -135,9 +135,19 @@ class ToolContext:
     metadata: Mapping[str, Any]
 
 
+# State schema version. Bump when RunState's wire shape changes in a way that
+# breaks deserialization. Checkpointers reject unknown versions.
+RUN_STATE_SCHEMA_VERSION = 1
+
+
 @dataclass
 class RunState:
-    """Mutable per-run state. Always JSON-serializable via to_dict()."""
+    """Mutable per-run state.
+
+    Always JSON-serializable via ``to_dict()`` and rehydratable via
+    ``RunState.from_dict()``. ``schema_version`` lets checkpointers detect
+    incompatible older snapshots and run migrations or refuse to load.
+    """
 
     goal: str
     run_id: str = field(default_factory=lambda: str(uuid4()))
@@ -147,6 +157,7 @@ class RunState:
     trace: list[TelemetryEvent] = field(default_factory=list)
     interrupt: Optional[Interrupt] = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    schema_version: int = RUN_STATE_SCHEMA_VERSION
 
     def add_observation(self, obs: Observation) -> None:
         self.observations.append(obs)
@@ -157,6 +168,7 @@ class RunState:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "schema_version": self.schema_version,
             "goal": self.goal,
             "run_id": self.run_id,
             "iteration": self.iteration,
@@ -166,6 +178,85 @@ class RunState:
             "interrupt": asdict(self.interrupt) if self.interrupt else None,
             "metadata": dict(self.metadata),
         }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "RunState":
+        """Rebuild a RunState from a previously serialized dict.
+
+        Raises:
+            UnknownSchemaVersionError: if the snapshot's schema_version isn't
+                supported by this build (no migration path defined).
+        """
+        version = data.get("schema_version", RUN_STATE_SCHEMA_VERSION)
+        if version > RUN_STATE_SCHEMA_VERSION:
+            raise UnknownSchemaVersionError(
+                f"snapshot schema_version={version} exceeds runtime "
+                f"max {RUN_STATE_SCHEMA_VERSION}"
+            )
+
+        observations = [
+            Observation(
+                iteration=o["iteration"],
+                kind=o["kind"],
+                payload=o.get("payload"),
+                timestamp=o.get("timestamp", time.time()),
+            )
+            for o in data.get("observations", [])
+        ]
+        trace = [
+            TelemetryEvent(
+                kind=t["kind"],
+                iteration=t["iteration"],
+                timestamp=t.get("timestamp", time.time()),
+                payload=dict(t.get("payload", {})),
+            )
+            for t in data.get("trace", [])
+        ]
+        interrupt = _interrupt_from_dict(data.get("interrupt"))
+
+        return cls(
+            goal=data["goal"],
+            run_id=data["run_id"],
+            iteration=data.get("iteration", 0),
+            observations=observations,
+            feedback=list(data.get("feedback", [])),
+            trace=trace,
+            interrupt=interrupt,
+            metadata=dict(data.get("metadata", {})),
+            schema_version=version,
+        )
+
+
+class UnknownSchemaVersionError(ValueError):
+    """Raised when a checkpoint's schema_version isn't loadable."""
+
+
+def _interrupt_from_dict(raw: Optional[Mapping[str, Any]]) -> Optional[Interrupt]:
+    if not raw:
+        return None
+    pending_raw = raw.get("pending_decision")
+    pending: Optional[Decision] = None
+    if pending_raw:
+        tool_calls_raw = pending_raw.get("tool_calls") or []
+        tool_calls = tuple(
+            ToolCall(
+                name=tc["name"],
+                args=dict(tc.get("args", {})),
+                call_id=tc.get("call_id", ""),
+            )
+            for tc in tool_calls_raw
+        )
+        pending = Decision(
+            kind=DecisionKind(pending_raw["kind"]),
+            tool_calls=tool_calls,
+            content=pending_raw.get("content", ""),
+        )
+    return Interrupt(
+        reason=InterruptReason(raw["reason"]),
+        message=raw["message"],
+        pending_decision=pending,
+        iteration=raw.get("iteration", 0),
+    )
 
 
 @dataclass(frozen=True)
