@@ -1,0 +1,103 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lingyia"
+version = "0.1.0"
+description = "Production-grade Python agent runtime. Sprouting intelligence, built to grow. (灵芽)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+authors = [
+    { name = "Lingyia Contributors" },
+]
+keywords = [
+    "ai",
+    "agent",
+    "llm",
+    "agentic",
+    "function-calling",
+    "tool-use",
+    "mcp",
+    "runtime",
+    "production",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+
+# Zero hard dependencies beyond httpx. Everything else is opt-in.
+dependencies = [
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+anthropic = [
+    "anthropic>=0.30",
+]
+opentelemetry = [
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
+]
+tiktoken = [
+    "tiktoken>=0.5",
+]
+dev = [
+    "pytest>=7",
+    "pytest-asyncio>=0.21",
+    "mypy>=1.0",
+]
+all = [
+    "anthropic>=0.30",
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
+    "tiktoken>=0.5",
+]
+
+[project.urls]
+Homepage = "https://github.com/seleeleemail-lgtm/lingyia"
+Repository = "https://github.com/seleeleemail-lgtm/lingyia"
+Issues = "https://github.com/seleeleemail-lgtm/lingyia/issues"
+Changelog = "https://github.com/seleeleemail-lgtm/lingyia/blob/main/CHANGELOG.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["lingyia_core", "lingyia_kit"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "lingyia_core",
+    "lingyia_kit",
+    "tests",
+    "docs",
+    "README.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "LICENSE",
+    "pyproject.toml",
+    "mypy.ini",
+]
+exclude = [
+    "*.pdf",
+    "*.html",
+    "datasets",
+    ".git",
+    ".github",
+    "__pycache__",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "lingyia_kit/tests"]
+python_files = ["test_*.py"]
+asyncio_mode = "auto"

@@ -1,6 +1,47 @@
+# Generated artifacts
 *.pdf
 *.html
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.python-version
+
+# Tooling caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
 .DS_Store
+
+# Project-local
 datasets/
+.env
+.env.local
+*.db
+*.sqlite
+*.sqlite3
+
+# Tool sessions
+.context/

@@ -1,0 +1,67 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # httpx is the only hard runtime dep; anthropic is needed for adapter tests
+          pip install httpx anthropic pytest pytest-asyncio
+
+      - name: Run core tests
+        run: |
+          python -m unittest tests.test_core_loop -v
+
+      - name: Run kit tests
+        run: |
+          python -m unittest \
+            lingyia_kit.tests.test_openai_adapter \
+            lingyia_kit.tests.test_tools \
+            lingyia_kit.tests.test_checkpointers \
+            lingyia_kit.tests.test_telemetry \
+            lingyia_kit.tests.test_pricing_and_cost \
+            lingyia_kit.tests.test_compactors \
+            lingyia_kit.tests.test_resilience \
+            lingyia_kit.tests.test_security \
+            lingyia_kit.tests.test_streaming_concurrency \
+            lingyia_kit.tests.test_integration_e2e \
+            lingyia_kit.tests.test_load_and_chaos \
+            -v
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install mypy httpx anthropic
+      - name: mypy
+        run: |
+          mypy --config-file mypy.ini lingyia_core lingyia_kit || true
+        # mypy is not blocking yet — we are still moving to strict typing.
+        # Remove `|| true` once disallow_untyped_defs is on.

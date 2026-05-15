@@ -10,7 +10,7 @@ import asyncio
 import json
 import unittest
 
-from agent_core import (
+from lingyia_core import (
     Decision,
     GuardResult,
     Harness,
@@ -23,7 +23,7 @@ from agent_core import (
     ToolResult,
     ValidationResult,
 )
-from agent_core.defaults.telemetry import NoopTelemetry
+from lingyia_core.defaults.telemetry import NoopTelemetry
 
 
 class ScriptedModel:
