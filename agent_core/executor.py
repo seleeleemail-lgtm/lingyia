@@ -116,17 +116,41 @@ EventCallback = Callable[[TelemetryEvent], None]
 
 
 class ToolExecutor:
-    """Executes a ToolCall with timeout + retry + sync/async adaptation."""
+    """Executes a ToolCall with timeout + retry + sync/async adaptation.
+
+    ``max_concurrency`` caps the number of tool invocations in flight at
+    any moment across this executor. Set to ``0`` (default) to disable.
+    Useful when many parallel tool_calls would overwhelm a downstream
+    service (e.g. SaaS APIs with low concurrent-connection limits).
+    """
 
     def __init__(
         self,
         default_timeout_s: float = 60.0,
         default_retry: Optional[RetryPolicy] = None,
+        max_concurrency: int = 0,
     ) -> None:
         self.default_timeout_s = default_timeout_s
         self.default_retry = default_retry or RetryPolicy(max_attempts=1)
+        self.max_concurrency = max_concurrency
+        # Lazy: ``asyncio.Semaphore()`` needs a running event loop on 3.9.
+        self._semaphore: Optional[asyncio.Semaphore] = None
 
     async def execute(
+        self,
+        tool: Tool,
+        call: ToolCall,
+        ctx: ToolContext,
+        on_event: Optional[EventCallback] = None,
+    ) -> ToolResult:
+        if self.max_concurrency > 0:
+            if self._semaphore is None:
+                self._semaphore = asyncio.Semaphore(self.max_concurrency)
+            async with self._semaphore:
+                return await self._execute_inner(tool, call, ctx, on_event)
+        return await self._execute_inner(tool, call, ctx, on_event)
+
+    async def _execute_inner(
         self,
         tool: Tool,
         call: ToolCall,

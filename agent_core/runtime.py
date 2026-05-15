@@ -202,6 +202,44 @@ class Runtime:
         state = RunState(goal=goal)
         return await self._continue(harness, state)
 
+    async def astream(self, harness: Harness, goal: str):
+        """Run an agent and yield events as they happen.
+
+        Yields tuples of ``(kind, payload)``:
+        - ``("event", TelemetryEvent)`` for each emitted telemetry event
+          (decision, tool_started, tool_completed, interrupt, ...).
+        - ``("final", RunResult)`` once exactly, when the run terminates.
+
+        UI clients can stream these to show incremental progress without
+        blocking on the full run.
+        """
+        import asyncio as _asyncio
+
+        queue: _asyncio.Queue = _asyncio.Queue()
+        original_telemetry = self.telemetry
+        try:
+            self.telemetry = _ChainedSink(original_telemetry, _QueueSink(queue))
+            run_task = _asyncio.create_task(self.arun(harness, goal))
+            while True:
+                getter = _asyncio.create_task(queue.get())
+                done, _ = await _asyncio.wait(
+                    [run_task, getter],
+                    return_when=_asyncio.FIRST_COMPLETED,
+                )
+                # Drain any events that landed while we were waiting.
+                if getter in done:
+                    yield ("event", getter.result())
+                else:
+                    getter.cancel()
+                if run_task.done():
+                    # Drain remaining events.
+                    while not queue.empty():
+                        yield ("event", queue.get_nowait())
+                    yield ("final", run_task.result())
+                    return
+        finally:
+            self.telemetry = original_telemetry
+
     def resume(
         self,
         harness: Harness,
@@ -506,6 +544,39 @@ class Runtime:
         )
         state.trace.append(enriched)
         self.telemetry.emit(enriched)
+
+
+class _QueueSink:
+    """Telemetry sink that pushes every event into an asyncio.Queue."""
+
+    def __init__(self, queue) -> None:
+        self._queue = queue
+
+    def emit(self, event: TelemetryEvent) -> None:
+        try:
+            self._queue.put_nowait(event)
+        except Exception:
+            # Backpressure protection: prefer dropping rather than crashing
+            # the run on telemetry-only failures.
+            pass
+
+
+class _ChainedSink:
+    """Fan-out sink that forwards every event to both inner sinks."""
+
+    def __init__(self, primary: TelemetrySink, secondary: TelemetrySink) -> None:
+        self._primary = primary
+        self._secondary = secondary
+
+    def emit(self, event: TelemetryEvent) -> None:
+        try:
+            self._primary.emit(event)
+        except Exception:
+            pass
+        try:
+            self._secondary.emit(event)
+        except Exception:
+            pass
 
 
 async def _unknown_tool_result(call: ToolCall) -> ToolResult:
