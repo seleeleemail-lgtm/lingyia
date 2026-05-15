@@ -21,6 +21,7 @@ from typing import Any, Mapping, Optional, Sequence
 import httpx
 
 from agent_core import Decision, RunState, ToolCall
+from agent_core.state import ModelUsage
 
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -183,6 +184,7 @@ class OpenAICompatibleModel:
         if not choices:
             raise RuntimeError(f"empty choices in response: {body}")
         msg = choices[0].get("message") or {}
+        usage = self._parse_usage(body)
 
         tool_calls = msg.get("tool_calls") or []
         if tool_calls:
@@ -205,10 +207,29 @@ class OpenAICompatibleModel:
                     args = {}
                 calls.append(ToolCall(name=name, args=args, call_id=tc.get("id") or ""))
             if calls:
-                return Decision.call_tools(tuple(calls))
+                return Decision(
+                    kind=Decision.call_tools(tuple(calls)).kind,
+                    tool_calls=tuple(calls),
+                    usage=usage,
+                )
 
         content = msg.get("content") or ""
-        return Decision.final_answer(content)
+        return Decision(
+            kind=Decision.final_answer(content).kind,
+            content=content,
+            usage=usage,
+        )
+
+    def _parse_usage(self, body: Mapping[str, Any]) -> ModelUsage:
+        u = body.get("usage") or {}
+        details = u.get("prompt_tokens_details") or {}
+        cached = int(details.get("cached_tokens") or 0)
+        return ModelUsage(
+            prompt_tokens=int(u.get("prompt_tokens") or 0),
+            completion_tokens=int(u.get("completion_tokens") or 0),
+            cached_tokens=cached,
+            model_id=self.model,
+        )
 
     async def aclose(self) -> None:
         if self._owns_client:

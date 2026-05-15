@@ -40,10 +40,28 @@ class ToolCall:
 
 
 @dataclass(frozen=True)
+class ModelUsage:
+    """Token usage and cost for one model invocation.
+
+    ``cached_tokens`` covers prompt tokens served from a provider-side cache
+    (Anthropic prompt caching, OpenAI prompt cache, etc.) — they generally
+    cost less than fresh prompt tokens. ``cost_usd`` is filled in by the
+    Runtime against a pricing table; adapters do not compute cost themselves.
+    """
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cached_tokens: int = 0
+    cost_usd: float = 0.0
+    model_id: str = ""
+
+
+@dataclass(frozen=True)
 class Decision:
     kind: DecisionKind
     tool_calls: tuple[ToolCall, ...] = ()
     content: str = ""
+    usage: Optional["ModelUsage"] = None
 
     def __post_init__(self) -> None:
         # Accept str inputs from legacy callers / deserialized state.

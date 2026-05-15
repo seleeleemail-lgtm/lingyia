@@ -101,6 +101,12 @@ class Runtime:
     compactor: Compactor
     executor: ToolExecutor
     max_iterations: int = 8
+    # 0 means no budget. When set, the run aborts as soon as accumulated
+    # ``state.metadata["cost_usd"]`` exceeds this value.
+    max_cost_usd: float = 0.0
+    # Optional callback ``(ModelUsage) -> float`` that adapters can use to
+    # compute cost when the adapter didn't fill ``usage.cost_usd`` itself.
+    cost_estimator: Optional[Callable[[Any], float]] = None
 
     # Construction --------------------------------------------------------
 
@@ -111,6 +117,8 @@ class Runtime:
         max_iterations: int = 8,
         default_timeout_s: float = 60.0,
         default_retry: Optional[RetryPolicy] = None,
+        max_cost_usd: float = 0.0,
+        cost_estimator: Optional[Callable[[Any], float]] = None,
     ) -> "Runtime":
         """Dev/test runtime with permissive defaults.
 
@@ -131,6 +139,8 @@ class Runtime:
                 default_retry=default_retry,
             ),
             max_iterations=max_iterations,
+            max_cost_usd=max_cost_usd,
+            cost_estimator=cost_estimator,
         )
 
     @classmethod
@@ -143,6 +153,8 @@ class Runtime:
         default_timeout_s: float = 60.0,
         default_retry: Optional[RetryPolicy] = None,
         max_iterations: int = 8,
+        max_cost_usd: float = 0.0,
+        cost_estimator: Optional[Callable[[Any], float]] = None,
     ) -> "Runtime":
         """Production runtime: fail closed on missing durability/observability."""
         if checkpointer is None:
@@ -161,6 +173,8 @@ class Runtime:
                 default_retry=default_retry,
             ),
             max_iterations=max_iterations,
+            max_cost_usd=max_cost_usd,
+            cost_estimator=cost_estimator,
         )
 
     # Public API ----------------------------------------------------------
@@ -243,14 +257,59 @@ class Runtime:
                     reason=f"model error: {exc}",
                 )
 
+            usage = decision.usage
+            cost_delta = 0.0
+            if usage is not None:
+                cost_delta = float(usage.cost_usd or 0.0)
+                if cost_delta == 0.0 and self.cost_estimator is not None:
+                    try:
+                        cost_delta = float(self.cost_estimator(usage) or 0.0)
+                    except Exception:
+                        cost_delta = 0.0
+                if cost_delta:
+                    prior = float(state.metadata.get("cost_usd", 0.0) or 0.0)
+                    state.metadata["cost_usd"] = round(prior + cost_delta, 6)
+                # Always accumulate token counters so callers can report on
+                # usage even when pricing is unknown.
+                tokens = state.metadata.setdefault("tokens", {
+                    "prompt": 0,
+                    "completion": 0,
+                    "cached": 0,
+                })
+                tokens["prompt"] += int(usage.prompt_tokens or 0)
+                tokens["completion"] += int(usage.completion_tokens or 0)
+                tokens["cached"] += int(usage.cached_tokens or 0)
+
+            decision_payload: dict[str, Any] = {
+                "kind": decision.kind.value,
+                "tool_calls": len(decision.tool_calls),
+            }
+            if usage is not None:
+                decision_payload.update({
+                    "model_id": usage.model_id,
+                    "prompt_tokens": usage.prompt_tokens,
+                    "completion_tokens": usage.completion_tokens,
+                    "cached_tokens": usage.cached_tokens,
+                    "cost_usd": cost_delta,
+                    "cost_total_usd": state.metadata.get("cost_usd", 0.0),
+                })
             self._emit(state, TelemetryEvent(
                 kind="decision",
                 iteration=state.iteration,
-                payload={
-                    "kind": decision.kind.value,
-                    "tool_calls": len(decision.tool_calls),
-                },
+                payload=decision_payload,
             ))
+
+            # Budget enforcement: abort the run if accumulated cost exceeds
+            # the configured ceiling. Done *after* recording the decision so
+            # the run's trace shows the cost that triggered the abort.
+            if self.max_cost_usd > 0:
+                total = float(state.metadata.get("cost_usd", 0.0) or 0.0)
+                if total > self.max_cost_usd:
+                    return RunResult(
+                        status=RunStatus.FAILED,
+                        state=state,
+                        reason=f"budget exceeded: ${total:.6f} > ${self.max_cost_usd:.6f}",
+                    )
 
             if decision.kind == DecisionKind.FINAL_ANSWER:
                 verdict = harness.validator(state)

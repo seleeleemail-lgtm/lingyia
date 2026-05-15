@@ -13,6 +13,7 @@ import json
 from typing import Any, Mapping, Optional, Sequence
 
 from agent_core import Decision, RunState, ToolCall
+from agent_core.state import ModelUsage
 
 try:
     from anthropic import AsyncAnthropic
@@ -159,6 +160,38 @@ class AnthropicModel:
             elif btype == "text":
                 text_parts.append(getattr(block, "text", "") or "")
 
+        usage = self._parse_usage(getattr(response, "usage", None))
+
         if tool_calls:
-            return Decision.call_tools(tuple(tool_calls))
-        return Decision.final_answer("\n".join(text_parts).strip())
+            return Decision(
+                kind=Decision.call_tools(tuple(tool_calls)).kind,
+                tool_calls=tuple(tool_calls),
+                usage=usage,
+            )
+        content = "\n".join(text_parts).strip()
+        return Decision(
+            kind=Decision.final_answer(content).kind,
+            content=content,
+            usage=usage,
+        )
+
+    def _parse_usage(self, u: Any) -> ModelUsage:
+        if u is None:
+            return ModelUsage(model_id=self.model)
+        # Anthropic SDK returns a typed object; fall back to dict-style for tests.
+        def _get(name: str, default: int = 0) -> int:
+            return int(getattr(u, name, None) or (u.get(name) if isinstance(u, dict) else None) or default)
+
+        input_tokens = _get("input_tokens")
+        output_tokens = _get("output_tokens")
+        cache_read = _get("cache_read_input_tokens")
+        cache_create = _get("cache_creation_input_tokens")
+        # We track cache_read as "cached_tokens" since they're discounted.
+        # cache_creation tokens are billed at the regular prompt rate, so we
+        # leave them inside prompt_tokens.
+        return ModelUsage(
+            prompt_tokens=input_tokens + cache_create + cache_read,
+            completion_tokens=output_tokens,
+            cached_tokens=cache_read,
+            model_id=self.model,
+        )
