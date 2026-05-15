@@ -1,20 +1,25 @@
-"""Minimal end-to-end example: read a file then summarize it.
+"""Minimal end-to-end example: list + read + summarize.
 
-Run with one of:
+Usage:
 
-    SILICONFLOW_API_KEY=sk-... python -m agent_kit.examples.hello_agent siliconflow
-    MINIMAX_API_KEY=...        python -m agent_kit.examples.hello_agent minimax
-    OPENAI_API_KEY=sk-...      python -m agent_kit.examples.hello_agent openai
-    ANTHROPIC_API_KEY=sk-...   python -m agent_kit.examples.hello_agent anthropic
+    SILICONFLOW_API_KEY=... python -m agent_kit.examples.hello_agent \\
+        --provider siliconflow --model deepseek-ai/DeepSeek-V4-Flash
+
+    ANTHROPIC_API_KEY=... python -m agent_kit.examples.hello_agent \\
+        --provider anthropic --model claude-sonnet-4-5
+
+Without --model the provider's built-in default is used.
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
 import os
 import sys
+import time
 
 from agent_core import Runtime
-from agent_core.defaults.telemetry import StdoutTelemetry
+from agent_core.defaults.telemetry import NoopTelemetry
 from agent_kit import (
     AnthropicModel,
     MiniMaxModel,
@@ -33,18 +38,25 @@ PROVIDERS = {
     "anthropic": ("ANTHROPIC_API_KEY", AnthropicModel),
 }
 
+DEFAULT_GOAL = (
+    "List the top-level entries in /Users/yuchen/Documents/leagl, "
+    "then read agent_core/__init__.py and tell me the public API in one paragraph."
+)
 
-async def main(provider: str = "siliconflow") -> None:
+
+async def run_once(provider: str, model_name: str | None, goal: str, max_iter: int) -> dict:
     env_var, cls = PROVIDERS[provider]
     api_key = os.environ.get(env_var)
     if not api_key:
-        print(f"Set {env_var} in your environment.")
-        sys.exit(1)
+        raise SystemExit(f"Set {env_var} in your environment.")
 
-    model = cls(api_key=api_key)
-    runtime = Runtime.dev(model=model, max_iterations=6)
-    # Quiet the dev telemetry; flip to StdoutTelemetry() to inspect events.
-    runtime.telemetry = StdoutTelemetry()
+    kwargs: dict = {"api_key": api_key}
+    if model_name:
+        kwargs["model"] = model_name
+    model = cls(**kwargs)
+
+    runtime = Runtime.dev(model=model, max_iterations=max_iter)
+    runtime.telemetry = NoopTelemetry()
 
     harness = react_harness(
         tools=[
@@ -53,22 +65,50 @@ async def main(provider: str = "siliconflow") -> None:
         ],
     )
 
-    goal = (
-        "List the top-level entries in /Users/yuchen/Documents/leagl, "
-        "then read agent_core/__init__.py and tell me the public API in one paragraph."
-    )
-
+    started = time.perf_counter()
     result = await runtime.arun(harness, goal=goal)
+    elapsed = time.perf_counter() - started
+
+    tool_calls = sum(
+        1 for o in result.state.observations if o.kind == "tool_result"
+    )
+    failed = sum(
+        1 for o in result.state.observations
+        if o.kind == "tool_result" and not o.payload.get("ok", True)
+    )
+    return {
+        "provider": provider,
+        "model": model_name or getattr(cls, "DEFAULT_MODEL", "default"),
+        "status": result.status.value,
+        "iterations": result.state.iteration,
+        "tool_calls": tool_calls,
+        "tool_failures": failed,
+        "elapsed_s": round(elapsed, 2),
+        "summary": result.summary,
+        "reason": result.reason,
+    }
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Run a hello-world agent against a provider.")
+    p.add_argument("--provider", default="siliconflow", choices=list(PROVIDERS))
+    p.add_argument("--model", default=None, help="Override the provider's default model.")
+    p.add_argument("--goal", default=DEFAULT_GOAL)
+    p.add_argument("--max-iter", type=int, default=8)
+    return p.parse_args(argv)
+
+
+async def main_async(args: argparse.Namespace) -> None:
+    out = await run_once(args.provider, args.model, args.goal, args.max_iter)
     print("\n=== RESULT ===")
-    print(f"status:  {result.status.value}")
-    print(f"summary: {result.summary}")
-    print(f"iterations: {result.state.iteration}")
-    print(f"observations: {len(result.state.observations)}")
+    for k in ("provider", "model", "status", "iterations", "tool_calls", "tool_failures", "elapsed_s"):
+        print(f"{k}: {out[k]}")
+    print("---")
+    if out["summary"]:
+        print(out["summary"])
+    if out["reason"]:
+        print(f"(reason: {out['reason']})")
 
 
 if __name__ == "__main__":
-    provider = sys.argv[1] if len(sys.argv) > 1 else "siliconflow"
-    if provider not in PROVIDERS:
-        print(f"Unknown provider: {provider}. Pick one of {list(PROVIDERS)}.")
-        sys.exit(1)
-    asyncio.run(main(provider))
+    asyncio.run(main_async(parse_args(sys.argv[1:])))
