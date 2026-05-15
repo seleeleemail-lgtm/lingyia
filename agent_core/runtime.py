@@ -409,8 +409,20 @@ class Runtime:
         return None
 
     def _emit(self, state: RunState, event: TelemetryEvent) -> None:
-        state.trace.append(event)
-        self.telemetry.emit(event)
+        # Tag each event with the run id so downstream sinks can correlate.
+        enriched = (
+            event
+            if event.run_id == state.run_id
+            else TelemetryEvent(
+                kind=event.kind,
+                iteration=event.iteration,
+                timestamp=event.timestamp,
+                payload=dict(event.payload),
+                run_id=state.run_id,
+            )
+        )
+        state.trace.append(enriched)
+        self.telemetry.emit(enriched)
 
 
 async def _unknown_tool_result(call: ToolCall) -> ToolResult:

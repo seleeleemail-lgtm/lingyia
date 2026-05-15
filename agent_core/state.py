@@ -109,6 +109,7 @@ class TelemetryEvent:
     iteration: int
     timestamp: float = field(default_factory=time.time)
     payload: Mapping[str, Any] = field(default_factory=dict)
+    run_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -209,6 +210,7 @@ class RunState:
                 iteration=t["iteration"],
                 timestamp=t.get("timestamp", time.time()),
                 payload=dict(t.get("payload", {})),
+                run_id=t.get("run_id", ""),
             )
             for t in data.get("trace", [])
         ]
