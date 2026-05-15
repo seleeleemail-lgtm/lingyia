@@ -77,17 +77,32 @@ class Harness:
 
     Harness deliberately knows nothing about timeouts, retries, checkpointers,
     telemetry, or compaction. Those live in the Runtime.
+
+    ``granted_permissions`` gates tool execution. The wildcard ``"*"`` allows
+    every tool (default). In production, list explicit permission strings and
+    decline broad grants — Tool.required_permissions is checked against this
+    set before any tool runs.
     """
 
     tools: list[Tool] = field(default_factory=list)
     validator: ValidatorFn = _default_validator
     guard: GuardFn = _default_guard
     context_builder: ContextBuilderFn = _default_context_builder
+    granted_permissions: frozenset = field(default_factory=lambda: frozenset(["*"]))
 
     def tool_by_name(self, name: str) -> Optional[Tool]:
         for t in self.tools:
             if t.name == name:
                 return t
+        return None
+
+    def permission_check(self, tool: Tool) -> Optional[str]:
+        """Return None if allowed, or an error message describing the gap."""
+        if "*" in self.granted_permissions:
+            return None
+        missing = tool.required_permissions - self.granted_permissions
+        if missing:
+            return f"missing permissions: {sorted(missing)}"
         return None
 
 
@@ -414,15 +429,24 @@ class Runtime:
             tool = harness.tool_by_name(call.name)
             if tool is None:
                 tasks.append(_unknown_tool_result(call))
-            else:
-                tasks.append(
-                    self.executor.execute(
-                        tool,
-                        call,
-                        ctx,
-                        on_event=lambda e: self._emit(state, e),
-                    )
+                continue
+            perm_error = harness.permission_check(tool)
+            if perm_error is not None:
+                self._emit(state, TelemetryEvent(
+                    kind="permission_denied",
+                    iteration=state.iteration,
+                    payload={"tool": tool.name, "reason": perm_error},
+                ))
+                tasks.append(_permission_denied_result(call, perm_error))
+                continue
+            tasks.append(
+                self.executor.execute(
+                    tool,
+                    call,
+                    ctx,
+                    on_event=lambda e: self._emit(state, e),
                 )
+            )
         results = await asyncio.gather(*tasks)
         for call, result in zip(ordered_calls, results):
             state.add_observation(Observation(
@@ -490,4 +514,13 @@ async def _unknown_tool_result(call: ToolCall) -> ToolResult:
         call_id=call.call_id,
         ok=False,
         error=f"unknown tool: {call.name}",
+    )
+
+
+async def _permission_denied_result(call: ToolCall, reason: str) -> ToolResult:
+    return ToolResult(
+        tool_name=call.name,
+        call_id=call.call_id,
+        ok=False,
+        error=f"permission denied: {reason}",
     )

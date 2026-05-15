@@ -41,6 +41,11 @@ class Tool:
 
     Either ``handler`` runs as async or sync, determined by ``is_async``.
     Prefer ``Tool.from_async`` / ``Tool.from_sync`` factories.
+
+    ``required_permissions`` is checked by the Runtime against the Harness's
+    ``granted_permissions`` before each call. A Harness with the wildcard
+    ``"*"`` grants everything (the default). Use specific permission strings
+    (e.g. ``"fs.write"``, ``"network.write"``) in production.
     """
 
     name: str
@@ -52,6 +57,7 @@ class Tool:
     retry: Optional[RetryPolicy] = None
     idempotent: bool = False
     side_effect: str = "read_only"  # "read_only" | "write" | "external_io"
+    required_permissions: frozenset = field(default_factory=frozenset)
 
     @classmethod
     def from_async(
@@ -64,6 +70,7 @@ class Tool:
         retry: Optional[RetryPolicy] = None,
         idempotent: bool = False,
         side_effect: str = "read_only",
+        required_permissions: Optional[frozenset] = None,
     ) -> "Tool":
         return cls(
             name=name,
@@ -75,6 +82,7 @@ class Tool:
             retry=retry,
             idempotent=idempotent,
             side_effect=side_effect,
+            required_permissions=frozenset(required_permissions or ()),
         )
 
     @classmethod
@@ -88,6 +96,7 @@ class Tool:
         retry: Optional[RetryPolicy] = None,
         idempotent: bool = False,
         side_effect: str = "read_only",
+        required_permissions: Optional[frozenset] = None,
     ) -> "Tool":
         return cls(
             name=name,
@@ -99,6 +108,7 @@ class Tool:
             retry=retry,
             idempotent=idempotent,
             side_effect=side_effect,
+            required_permissions=frozenset(required_permissions or ()),
         )
 
 
