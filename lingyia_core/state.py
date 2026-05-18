@@ -1,7 +1,15 @@
-"""Typed runtime state for the agent loop.
+"""Typed runtime state for the v0.2 agent loop.
 
-All types here are JSON-serializable to support cross-process pause/resume.
-This module owns the data shapes; the loop and runtime own the transitions.
+v0.2-α breaking changes from v0.1:
+- RunState.goal removed; messages: list[Message] is source of truth
+- RunState.observations removed; tool results encoded as ToolResultBlock
+- RunState.feedback removed; encoded as user-role Message with TextBlock
+- RunState schema_version bumped 1 → 2; v0.1 snapshots rejected
+- Decision.content: str → tuple[ContentBlock, ...]
+- Decision.tool_calls becomes derived accessor (filter ToolUseBlock)
+- ToolContext.goal removed; messages: tuple[Message, ...] added
+
+Spec: v0.2-α §4.8, §4.9, §6
 """
 from __future__ import annotations
 
@@ -10,6 +18,15 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Mapping, Optional
 from uuid import uuid4
+
+from .blocks import (
+    ContentBlock,
+    TextBlock,
+    ToolUseBlock,
+    block_from_dict,
+    block_to_dict,
+)
+from .message import Message
 
 
 class DecisionKind(str, Enum):
@@ -34,6 +51,11 @@ class RunStatus(str, Enum):
 
 @dataclass(frozen=True)
 class ToolCall:
+    """Internal executor representation. NOT part of public transcript.
+
+    Runtime converts Decision.tool_calls (ToolUseBlock) → ToolCall for executor.
+    Existing tool handlers continue to consume ToolCall unchanged.
+    """
     name: str
     args: Mapping[str, Any] = field(default_factory=dict)
     call_id: str = field(default_factory=lambda: str(uuid4()))
@@ -41,14 +63,7 @@ class ToolCall:
 
 @dataclass(frozen=True)
 class ModelUsage:
-    """Token usage and cost for one model invocation.
-
-    ``cached_tokens`` covers prompt tokens served from a provider-side cache
-    (Anthropic prompt caching, OpenAI prompt cache, etc.) — they generally
-    cost less than fresh prompt tokens. ``cost_usd`` is filled in by the
-    Runtime against a pricing table; adapters do not compute cost themselves.
-    """
-
+    """Token usage and cost for one model invocation. v0.1 contract unchanged."""
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cached_tokens: int = 0
@@ -58,52 +73,63 @@ class ModelUsage:
 
 @dataclass(frozen=True)
 class Decision:
+    """Model output: control signal + content blocks + optional usage.
+
+    v0.2 change: content is now tuple[ContentBlock, ...] (was str).
+    tool_calls becomes derived from content. ASK_HUMAN/ABORT store their
+    text in TextBlock content so decision.text accessor still works.
+    """
     kind: DecisionKind
-    tool_calls: tuple[ToolCall, ...] = ()
-    content: str = ""
-    usage: Optional["ModelUsage"] = None
+    content: tuple[ContentBlock, ...] = ()
+    usage: Optional[ModelUsage] = None
 
     def __post_init__(self) -> None:
-        # Accept str inputs from legacy callers / deserialized state.
         if not isinstance(self.kind, DecisionKind):
             object.__setattr__(self, "kind", DecisionKind(self.kind))
 
-    @classmethod
-    def call_tool(cls, name: str, args: Optional[Mapping[str, Any]] = None) -> "Decision":
-        return cls(
-            kind=DecisionKind.CALL_TOOL,
-            tool_calls=(ToolCall(name=name, args=dict(args or {})),),
-        )
+    @property
+    def tool_calls(self) -> tuple[ToolUseBlock, ...]:
+        """Derived: all ToolUseBlocks in content."""
+        return tuple(b for b in self.content if isinstance(b, ToolUseBlock))
+
+    @property
+    def text(self) -> str:
+        """Concatenated user-visible text. Does NOT include ThinkingBlock content."""
+        return "".join(b.text for b in self.content if isinstance(b, TextBlock))
 
     @classmethod
-    def call_tools(cls, tool_calls: tuple[ToolCall, ...]) -> "Decision":
-        if not tool_calls:
-            raise ValueError("call_tools requires at least one ToolCall")
-        return cls(kind=DecisionKind.CALL_TOOL, tool_calls=tool_calls)
+    def call_tools(cls, blocks) -> "Decision":
+        block_tuple = tuple(blocks)
+        if not block_tuple:
+            raise ValueError("call_tools requires at least one ToolUseBlock")
+        for b in block_tuple:
+            if not isinstance(b, ToolUseBlock):
+                raise TypeError(f"call_tools expects ToolUseBlock, got {type(b).__name__}")
+        return cls(kind=DecisionKind.CALL_TOOL, content=block_tuple)
 
     @classmethod
-    def final_answer(cls, content: str) -> "Decision":
-        return cls(kind=DecisionKind.FINAL_ANSWER, content=content)
+    def final_answer(cls, content) -> "Decision":
+        """Build a FINAL_ANSWER decision. Accepts str (wrapped as TextBlock) or sequence of blocks."""
+        if isinstance(content, str):
+            return cls(kind=DecisionKind.FINAL_ANSWER, content=(TextBlock(text=content),))
+        return cls(kind=DecisionKind.FINAL_ANSWER, content=tuple(content))
 
     @classmethod
     def ask_human(cls, question: str) -> "Decision":
-        return cls(kind=DecisionKind.ASK_HUMAN, content=question)
+        return cls(kind=DecisionKind.ASK_HUMAN, content=(TextBlock(text=question),))
 
     @classmethod
     def abort(cls, reason: str) -> "Decision":
-        return cls(kind=DecisionKind.ABORT, content=reason)
+        return cls(kind=DecisionKind.ABORT, content=(TextBlock(text=reason),))
 
 
 @dataclass(frozen=True)
 class ToolResult:
-    """Result of a tool invocation.
+    """Result of a tool invocation. v0.1 contract unchanged.
 
-    Field order matches the original ``(tool_name, ok, output, error)`` positional
-    contract used by tool handlers. Newer fields (``duration_ms``, ``attempts``,
-    ``call_id``) come last and all have defaults so handlers can keep using
-    positional construction without binding new fields by accident.
+    Runtime converts ToolResult → ToolResultBlock when appending to messages
+    (see v0.2-α §8).
     """
-
     tool_name: str
     ok: bool = True
     output: Any = None
@@ -115,6 +141,13 @@ class ToolResult:
 
 @dataclass(frozen=True)
 class Observation:
+    """DEPRECATED in v0.2. Kept exported for migration tooling only.
+
+    v0.1 used observations to record tool results and intermediate state.
+    v0.2 uses messages as source of truth. Migration helper at
+    lingyia_kit.migrations.v01_to_v02 converts v0.1 observations into
+    appropriate v0.2 messages.
+    """
     iteration: int
     kind: str
     payload: Any
@@ -142,86 +175,63 @@ class Interrupt:
 class ToolContext:
     """Read-only view passed to tool handlers.
 
-    Tools must not mutate run state directly. They return ToolResult; the runtime
-    integrates results into state. Note: this does not prevent side effects on
-    external systems. Replayability of side-effecting tools requires idempotency
-    keys and a durable action log, not captured here.
+    v0.2 change: no `goal` field. Tools that want "current user query"
+    should extract from latest USER-role Message TextBlock in `messages`.
     """
-
     run_id: str
     iteration: int
-    goal: str
+    messages: tuple[Message, ...]
     metadata: Mapping[str, Any]
 
 
-# State schema version. Bump when RunState's wire shape changes in a way that
-# breaks deserialization. Checkpointers reject unknown versions.
-RUN_STATE_SCHEMA_VERSION = 1
+# v0.2-α schema version bump. v0.1 (schema_version=1) snapshots are rejected
+# at load time; use lingyia_kit.migrations.v01_to_v02 to upgrade.
+RUN_STATE_SCHEMA_VERSION = 2
 
 
 @dataclass
 class RunState:
-    """Mutable per-run state.
+    """Mutable per-run state. v0.2 contract.
 
-    Always JSON-serializable via ``to_dict()`` and rehydratable via
-    ``RunState.from_dict()``. ``schema_version`` lets checkpointers detect
-    incompatible older snapshots and run migrations or refuse to load.
+    messages is the conversation source of truth. Tool results live as
+    ToolResultBlock inside user-role messages (Anthropic style).
+    Trace events still recorded separately for telemetry.
     """
-
-    goal: str
+    messages: list[Message]
     run_id: str = field(default_factory=lambda: str(uuid4()))
     iteration: int = 0
-    observations: list[Observation] = field(default_factory=list)
-    feedback: list[str] = field(default_factory=list)
     trace: list[TelemetryEvent] = field(default_factory=list)
     interrupt: Optional[Interrupt] = None
     metadata: dict[str, Any] = field(default_factory=dict)
     schema_version: int = RUN_STATE_SCHEMA_VERSION
 
-    def add_observation(self, obs: Observation) -> None:
-        self.observations.append(obs)
-
-    def add_feedback(self, feedback: str) -> None:
-        if feedback:
-            self.feedback.append(feedback)
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
-            "goal": self.goal,
+            "messages": [m.to_dict() for m in self.messages],
             "run_id": self.run_id,
             "iteration": self.iteration,
-            "observations": [asdict(o) for o in self.observations],
-            "feedback": list(self.feedback),
             "trace": [asdict(t) for t in self.trace],
-            "interrupt": asdict(self.interrupt) if self.interrupt else None,
+            "interrupt": _interrupt_to_dict(self.interrupt) if self.interrupt else None,
             "metadata": dict(self.metadata),
         }
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "RunState":
-        """Rebuild a RunState from a previously serialized dict.
+        """Load v0.2 snapshot. Rejects BOTH v0.1 (version < 2) and future (version > 2).
 
-        Raises:
-            UnknownSchemaVersionError: if the snapshot's schema_version isn't
-                supported by this build (no migration path defined).
+        For v0.1 snapshots, use lingyia_kit.migrations.v01_to_v02.migrate_state_dict()
+        to upgrade before loading.
         """
         version = data.get("schema_version", RUN_STATE_SCHEMA_VERSION)
-        if version > RUN_STATE_SCHEMA_VERSION:
+        if version != RUN_STATE_SCHEMA_VERSION:
             raise UnknownSchemaVersionError(
-                f"snapshot schema_version={version} exceeds runtime "
-                f"max {RUN_STATE_SCHEMA_VERSION}"
+                f"snapshot schema_version={version} not loadable by runtime "
+                f"version={RUN_STATE_SCHEMA_VERSION}. Use "
+                f"lingyia_kit.migrations.v01_to_v02 for v0.1 → v0.2 migration."
             )
 
-        observations = [
-            Observation(
-                iteration=o["iteration"],
-                kind=o["kind"],
-                payload=o.get("payload"),
-                timestamp=o.get("timestamp", time.time()),
-            )
-            for o in data.get("observations", [])
-        ]
+        messages = [Message.from_dict(m) for m in data.get("messages", [])]
         trace = [
             TelemetryEvent(
                 kind=t["kind"],
@@ -233,13 +243,10 @@ class RunState:
             for t in data.get("trace", [])
         ]
         interrupt = _interrupt_from_dict(data.get("interrupt"))
-
         return cls(
-            goal=data["goal"],
+            messages=messages,
             run_id=data["run_id"],
             iteration=data.get("iteration", 0),
-            observations=observations,
-            feedback=list(data.get("feedback", [])),
             trace=trace,
             interrupt=interrupt,
             metadata=dict(data.get("metadata", {})),
@@ -248,7 +255,26 @@ class RunState:
 
 
 class UnknownSchemaVersionError(ValueError):
-    """Raised when a checkpoint's schema_version isn't loadable."""
+    """Raised when a checkpoint's schema_version isn't loadable.
+
+    v0.2-α: raised for both version < 2 and version > 2.
+    """
+
+
+def _interrupt_to_dict(interrupt: Interrupt) -> dict[str, Any]:
+    pending: Optional[dict[str, Any]] = None
+    if interrupt.pending_decision is not None:
+        pd = interrupt.pending_decision
+        pending = {
+            "kind": pd.kind.value,
+            "content": [block_to_dict(b) for b in pd.content],
+        }
+    return {
+        "reason": interrupt.reason.value,
+        "message": interrupt.message,
+        "pending_decision": pending,
+        "iteration": interrupt.iteration,
+    }
 
 
 def _interrupt_from_dict(raw: Optional[Mapping[str, Any]]) -> Optional[Interrupt]:
@@ -257,19 +283,10 @@ def _interrupt_from_dict(raw: Optional[Mapping[str, Any]]) -> Optional[Interrupt
     pending_raw = raw.get("pending_decision")
     pending: Optional[Decision] = None
     if pending_raw:
-        tool_calls_raw = pending_raw.get("tool_calls") or []
-        tool_calls = tuple(
-            ToolCall(
-                name=tc["name"],
-                args=dict(tc.get("args", {})),
-                call_id=tc.get("call_id", ""),
-            )
-            for tc in tool_calls_raw
-        )
+        content_blocks = tuple(block_from_dict(b) for b in pending_raw.get("content", []))
         pending = Decision(
             kind=DecisionKind(pending_raw["kind"]),
-            tool_calls=tool_calls,
-            content=pending_raw.get("content", ""),
+            content=content_blocks,
         )
     return Interrupt(
         reason=InterruptReason(raw["reason"]),
