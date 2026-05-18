@@ -11,6 +11,9 @@ listed at https://siliconflow.cn/models.
 """
 from __future__ import annotations
 
+from lingyia_core.blocks import BlockKind
+from lingyia_core.capability import ModelCapabilities
+
 from ._openai_base import OpenAICompatibleModel
 
 
@@ -24,4 +27,23 @@ class SiliconFlowModel(OpenAICompatibleModel):
             base_url=kwargs.pop("base_url", self.DEFAULT_BASE_URL),
             model=model,
             **kwargs,
+        )
+
+    @property
+    def capabilities(self) -> ModelCapabilities:
+        """Per-model context windows."""
+        context_map = {
+            "Pro/zai-org/GLM-5.1": 205_000,
+            "Pro/moonshotai/Kimi-K2.6": 200_000,
+            "deepseek-ai/DeepSeek-V4-Flash": 128_000,
+        }
+        return ModelCapabilities(
+            model_id=self.model,
+            accepts=frozenset({BlockKind.TEXT, BlockKind.TOOL_USE, BlockKind.TOOL_RESULT}),
+            emits=frozenset({BlockKind.TEXT, BlockKind.TOOL_USE}),
+            supports_streaming=True,
+            supports_parallel_tools=True,
+            supports_json_schema=True,
+            max_context_tokens=context_map.get(self.model, 32_000),
+            max_output_tokens=8192,
         )

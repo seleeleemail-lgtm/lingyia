@@ -9,6 +9,9 @@ for latency-sensitive paths.
 """
 from __future__ import annotations
 
+from lingyia_core.blocks import BlockKind
+from lingyia_core.capability import ModelCapabilities
+
 from ._openai_base import OpenAICompatibleModel
 
 
@@ -22,4 +25,16 @@ class MiniMaxModel(OpenAICompatibleModel):
             base_url=kwargs.pop("base_url", self.DEFAULT_BASE_URL),
             model=model,
             **kwargs,
+        )
+
+    @property
+    def capabilities(self) -> ModelCapabilities:
+        return ModelCapabilities(
+            model_id=self.model,
+            accepts=frozenset({BlockKind.TEXT, BlockKind.TOOL_USE, BlockKind.TOOL_RESULT}),
+            emits=frozenset({BlockKind.TEXT, BlockKind.TOOL_USE}),
+            supports_streaming=True,
+            supports_parallel_tools=True,
+            max_context_tokens=200_000,
+            max_output_tokens=8192,
         )
