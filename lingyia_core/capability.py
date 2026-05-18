@@ -35,8 +35,11 @@ class ModelCapabilities:
 
 
 class CapabilityMismatchError(RuntimeError):
-    """Raised by FailFastCapabilityPolicy when messages contain block kinds
-    not in model.capabilities.accepts.
+    """Raised by FailFastCapabilityPolicy when *input messages* contain block
+    kinds not in ``model.capabilities.accepts``.
+
+    Direction: client → model. The runtime refuses to send blocks the model
+    has declared it cannot consume.
     """
 
     def __init__(
@@ -55,6 +58,34 @@ class CapabilityMismatchError(RuntimeError):
         super().__init__(
             f"Model {model_id!r} does not accept blocks: {unsupported_list}. "
             f"Accepted: {accepted_list}."
+        )
+
+
+class CapabilityViolationError(RuntimeError):
+    """Raised when a Model emits a block kind not in its declared
+    ``capabilities.emits`` (spec §16).
+
+    Direction: model → client. The adapter advertised what it can produce;
+    if it returns something else, the runtime rejects the decision so the
+    bug surfaces immediately instead of poisoning the transcript.
+    """
+
+    def __init__(
+        self,
+        emitted: frozenset[BlockKind],
+        declared: frozenset[BlockKind],
+        leaked: frozenset[BlockKind],
+        model_id: str,
+    ) -> None:
+        self.emitted = emitted
+        self.declared = declared
+        self.leaked = leaked
+        self.model_id = model_id
+        leaked_list = sorted(b.value for b in leaked)
+        declared_list = sorted(b.value for b in declared)
+        super().__init__(
+            f"Model {model_id!r} emitted blocks not in capabilities.emits: "
+            f"{leaked_list}. Declared emits: {declared_list}."
         )
 
 

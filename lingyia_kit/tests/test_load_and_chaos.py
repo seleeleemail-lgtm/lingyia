@@ -37,6 +37,7 @@ from lingyia_kit.checkpointers import SqliteCheckpointer
 _FAKE_CAPS = ModelCapabilities(
     model_id="fake",
     accepts=frozenset({BlockKind.TEXT, BlockKind.TOOL_USE, BlockKind.TOOL_RESULT}),
+    emits=frozenset({BlockKind.TEXT, BlockKind.TOOL_USE}),
 )
 
 

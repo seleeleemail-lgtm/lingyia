@@ -55,6 +55,7 @@ from .blocks import (
 from .capability import (
     CapabilityMismatchError,
     CapabilityPolicy,
+    CapabilityViolationError,
     FailFastCapabilityPolicy,
     ModelCapabilities,
 )
@@ -102,6 +103,7 @@ __all__ = [
     "block_to_dict",
     "CapabilityMismatchError",
     "CapabilityPolicy",
+    "CapabilityViolationError",
     "FailFastCapabilityPolicy",
     "ModelCapabilities",
     "Message",

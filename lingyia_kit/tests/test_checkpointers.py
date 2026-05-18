@@ -29,6 +29,7 @@ from lingyia_core import (
     ToolResult,
 )
 from lingyia_core.blocks import (
+    BlockKind,
     Role,
     TextBlock,
     ToolResultBlock,
@@ -42,7 +43,11 @@ from lingyia_kit.checkpointers import SqliteCheckpointer
 class FixedDecisionModel:
     """Async model double that yields a scripted sequence of decisions."""
 
-    capabilities = ModelCapabilities(model_id="fake")
+    capabilities = ModelCapabilities(
+        model_id="fake",
+        accepts=frozenset({BlockKind.TEXT, BlockKind.TOOL_USE, BlockKind.TOOL_RESULT}),
+        emits=frozenset({BlockKind.TEXT, BlockKind.TOOL_USE}),
+    )
 
     def __init__(self, *decisions):
         self.decisions = list(decisions)

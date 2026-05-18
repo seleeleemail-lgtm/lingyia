@@ -26,6 +26,7 @@ from lingyia_core.defaults.telemetry import NoopTelemetry
 _FAKE_CAPS = ModelCapabilities(
     model_id="fake",
     accepts=frozenset({BlockKind.TEXT, BlockKind.TOOL_USE, BlockKind.TOOL_RESULT}),
+    emits=frozenset({BlockKind.TEXT, BlockKind.TOOL_USE}),
 )
 from lingyia_kit.redaction import RegexRedactor
 from lingyia_kit.secrets import (

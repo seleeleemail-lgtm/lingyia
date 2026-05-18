@@ -27,6 +27,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence, Union
 from .blocks import Role, TextBlock, ToolResultBlock, ToolUseBlock
 from .capability import (
     CapabilityPolicy,
+    CapabilityViolationError,
     FailFastCapabilityPolicy,
     ModelCapabilities,
 )
@@ -366,6 +367,11 @@ class Runtime:
     # Loop ----------------------------------------------------------------
 
     async def _continue(self, harness: Harness, state: RunState) -> RunResult:
+        # v0.2: every Model MUST expose a ModelCapabilities object. This is
+        # a hard requirement of the contract — letting it be optional would
+        # silently bypass §16 enforcement for any adapter that forgot it.
+        capabilities = self._require_capabilities()
+
         # v0.2: inject SYSTEM message at run start if harness has system_prompt.
         if (
             harness.system_prompt
@@ -383,14 +389,12 @@ class Runtime:
 
             context = harness.context_builder(state, harness.tools)
 
-            # Capability check: validate that no message contains block kinds
-            # unsupported by the model. The default policy raises; downgrade
-            # policies may rewrite messages in place.
-            capabilities = getattr(self.model, "capabilities", None)
-            if isinstance(capabilities, ModelCapabilities):
-                state.messages = list(
-                    self.capability_policy.apply(state.messages, capabilities)
-                )
+            # Capability check (input direction): validate that no message
+            # contains block kinds unsupported by the model. The default
+            # policy raises; downgrade policies may rewrite messages.
+            state.messages = list(
+                self.capability_policy.apply(state.messages, capabilities)
+            )
 
             try:
                 decision = await self.model.adecide(context, state, harness.tools)
@@ -408,6 +412,12 @@ class Runtime:
                     state=state,
                     reason=f"model error: {exc}",
                 )
+
+            # Capability check (output direction, spec §16): the model must
+            # only emit block kinds it declared in capabilities.emits. This
+            # catches adapter bugs (e.g. a non-Anthropic model returning a
+            # ThinkingBlock) before they poison the transcript.
+            self._enforce_emits(decision, capabilities)
 
             usage = decision.usage
             cost_delta = 0.0
@@ -646,6 +656,55 @@ class Runtime:
             state.messages.append(_user_text_message(verdict.feedback))
         state.iteration += 1
         return None
+
+    def _require_capabilities(self) -> ModelCapabilities:
+        """Return ``self.model.capabilities`` or raise.
+
+        Spec §4.5/§4.7: every Model adapter MUST advertise a real
+        ``ModelCapabilities`` instance. Letting this silently default would
+        bypass the §16 contract check; bugs would surface only at production
+        runtime against an actual Claude/OpenAI endpoint.
+        """
+        caps = getattr(self.model, "capabilities", None)
+        if caps is None:
+            raise TypeError(
+                f"Model {type(self.model).__name__} has no 'capabilities' "
+                "attribute. v0.2 Models MUST expose a ModelCapabilities "
+                "instance (see lingyia_core.capability.ModelCapabilities)."
+            )
+        if not isinstance(caps, ModelCapabilities):
+            raise TypeError(
+                f"Model {type(self.model).__name__}.capabilities must be a "
+                f"ModelCapabilities instance, got {type(caps).__name__}."
+            )
+        return caps
+
+    @staticmethod
+    def _enforce_emits(decision: Decision, capabilities: ModelCapabilities) -> None:
+        """Reject Decision.content blocks outside capabilities.emits (spec §16)."""
+        from .blocks import BlockKind  # local import to avoid cycle hazards
+
+        emitted: set[BlockKind] = set()
+        for block in decision.content:
+            try:
+                emitted.add(BlockKind(block.type))  # type: ignore[attr-defined]
+            except (ValueError, AttributeError):
+                # Unknown block type — treat as a violation; the adapter
+                # returned something not in the v0.2 union at all.
+                raise CapabilityViolationError(
+                    emitted=frozenset(),
+                    declared=capabilities.emits,
+                    leaked=frozenset(),
+                    model_id=capabilities.model_id,
+                )
+        leaked = frozenset(emitted) - capabilities.emits
+        if leaked:
+            raise CapabilityViolationError(
+                emitted=frozenset(emitted),
+                declared=capabilities.emits,
+                leaked=leaked,
+                model_id=capabilities.model_id,
+            )
 
     def _emit(self, state: RunState, event: TelemetryEvent) -> None:
         # Tag each event with the run id so downstream sinks can correlate.

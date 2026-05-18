@@ -24,6 +24,7 @@ import httpx
 
 from lingyia_core import Decision, RunState
 from lingyia_core.blocks import (
+    BlockKind,
     ImageBlock,
     Role,
     TextBlock,
@@ -31,6 +32,7 @@ from lingyia_core.blocks import (
     ToolUseBlock,
     block_to_dict,
 )
+from lingyia_core.capability import ModelCapabilities
 from lingyia_core.state import DecisionKind, ModelUsage
 
 
@@ -72,6 +74,32 @@ class OpenAICompatibleModel:
         self.extra_body = dict(extra_body or {})
         self._client = client or httpx.AsyncClient(timeout=timeout_s)
         self._owns_client = client is None
+
+    @property
+    def capabilities(self) -> ModelCapabilities:
+        """Conservative defaults for any OpenAI-compatible endpoint.
+
+        Subclasses (OpenAIModel, MiniMax, SiliconFlow) override this to
+        declare vision support and per-provider context window sizes. The
+        base class advertises the common safe minimum: text + function
+        calling, no vision, no thinking.
+        """
+        return ModelCapabilities(
+            model_id=self.model,
+            accepts=frozenset({
+                BlockKind.TEXT,
+                BlockKind.TOOL_USE,
+                BlockKind.TOOL_RESULT,
+            }),
+            emits=frozenset({BlockKind.TEXT, BlockKind.TOOL_USE}),
+            supports_streaming=True,
+            supports_parallel_tools=True,
+            supports_json_schema=False,
+            supports_strict_schema=False,
+            supports_prompt_caching=False,
+            max_context_tokens=8192,
+            max_output_tokens=4096,
+        )
 
     async def adecide(
         self,

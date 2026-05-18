@@ -246,6 +246,7 @@ class TelemetryIntegrationTests(unittest.TestCase):
             accepts=frozenset({
                 BlockKind.TEXT, BlockKind.TOOL_USE, BlockKind.TOOL_RESULT,
             }),
+            emits=frozenset({BlockKind.TEXT, BlockKind.TOOL_USE}),
         )
 
         captured: list[TelemetryEvent] = []

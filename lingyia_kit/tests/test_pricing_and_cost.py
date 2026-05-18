@@ -28,6 +28,7 @@ from lingyia_core.state import ModelUsage
 _FAKE_CAPS = ModelCapabilities(
     model_id="fake",
     accepts=frozenset({BlockKind.TEXT, BlockKind.TOOL_USE, BlockKind.TOOL_RESULT}),
+    emits=frozenset({BlockKind.TEXT, BlockKind.TOOL_USE}),
 )
 from lingyia_core.defaults.telemetry import NoopTelemetry
 from lingyia_kit.adapters._openai_base import OpenAICompatibleModel
