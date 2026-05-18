@@ -10,10 +10,14 @@ import httpx
 from lingyia_core import (
     Decision,
     Harness,
+    Message,
+    Role,
     Runtime,
     RunStatus,
+    TextBlock,
     Tool,
     ToolResult,
+    ToolUseBlock,
     ValidationResult,
 )
 from lingyia_core.state import ModelUsage
@@ -67,7 +71,8 @@ class OpenAIUsageParsingTests(unittest.TestCase):
             client=self._client(handler),
         )
         from lingyia_core import RunState
-        decision = asyncio.run(model.adecide({}, RunState(goal="t"), []))
+        seed = [Message(role=Role.USER, content=(TextBlock(text="t"),))]
+        decision = asyncio.run(model.adecide({}, RunState(messages=seed), []))
         self.assertIsNotNone(decision.usage)
         self.assertEqual(decision.usage.prompt_tokens, 100)
         self.assertEqual(decision.usage.completion_tokens, 50)
@@ -88,7 +93,7 @@ class CostAccumulationTests(unittest.TestCase):
         # Two decisions, each with 1M prompt tokens at gpt-4o-mini rate ($0.15)
         d1 = Decision(
             kind=Decision.final_answer("").kind,
-            content="",
+            content=(TextBlock(text=""),),
             usage=ModelUsage(
                 prompt_tokens=1_000_000,
                 completion_tokens=0,
@@ -109,9 +114,12 @@ class CostAccumulationTests(unittest.TestCase):
         self.assertEqual(result.state.metadata["tokens"]["prompt"], 1_000_000)
 
     def test_max_cost_usd_aborts_run(self):
+        expensive = Decision.call_tools([
+            ToolUseBlock(id="call-1", name="noop", input={}),
+        ])
         expensive = Decision(
-            kind=Decision.call_tool("noop").kind,
-            tool_calls=Decision.call_tool("noop").tool_calls,
+            kind=expensive.kind,
+            content=expensive.content,
             usage=ModelUsage(
                 prompt_tokens=2_000_000,
                 completion_tokens=0,
@@ -134,7 +142,7 @@ class CostAccumulationTests(unittest.TestCase):
     def test_cost_estimator_used_when_decision_lacks_cost(self):
         decision = Decision(
             kind=Decision.final_answer("hi").kind,
-            content="hi",
+            content=(TextBlock(text="hi"),),
             usage=ModelUsage(
                 prompt_tokens=1_000_000,
                 completion_tokens=0,

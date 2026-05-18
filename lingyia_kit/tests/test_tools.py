@@ -16,7 +16,7 @@ from lingyia_kit.tools import (
 
 
 def _ctx() -> ToolContext:
-    return ToolContext(run_id="test", iteration=0, goal="t", metadata={})
+    return ToolContext(run_id="test", iteration=0, messages=(), metadata={})
 
 
 def _run_sync(tool, args):

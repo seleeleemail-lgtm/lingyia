@@ -5,7 +5,7 @@ import asyncio
 import time
 import unittest
 
-from lingyia_core import Decision, RunState
+from lingyia_core import Decision, Message, Role, RunState, TextBlock
 from lingyia_kit.resilience import (
     CircuitBreaker,
     CircuitOpenError,
@@ -134,6 +134,10 @@ class RateLimiterTests(unittest.TestCase):
 # ProtectedModel ---------------------------------------------------------
 
 
+def _seed_state() -> RunState:
+    return RunState(messages=[Message(role=Role.USER, content=(TextBlock(text="t"),))])
+
+
 class _FlakyModel:
     def __init__(self):
         self.calls = 0
@@ -163,12 +167,12 @@ class ProtectedModelTests(unittest.TestCase):
 
         async def go():
             with self.assertRaises(RuntimeError):
-                await pm.adecide({}, RunState(goal="t"), [])
+                await pm.adecide({}, _seed_state(), [])
             with self.assertRaises(RuntimeError):
-                await pm.adecide({}, RunState(goal="t"), [])
+                await pm.adecide({}, _seed_state(), [])
             # Now circuit open
             with self.assertRaises(CircuitOpenError):
-                await pm.adecide({}, RunState(goal="t"), [])
+                await pm.adecide({}, _seed_state(), [])
 
         asyncio.run(go())
 
@@ -179,7 +183,7 @@ class ProtectedModelTests(unittest.TestCase):
         async def go():
             start = time.monotonic()
             for _ in range(4):
-                await pm.adecide({}, RunState(goal="t"), [])
+                await pm.adecide({}, _seed_state(), [])
             return time.monotonic() - start
 
         elapsed = asyncio.run(asyncio.wait_for(go(), timeout=2.0))
@@ -195,14 +199,14 @@ class ProtectedModelTests(unittest.TestCase):
         async def go():
             for _ in range(3):
                 try:
-                    await pm.adecide({}, RunState(goal="t"), [])
+                    await pm.adecide({}, _seed_state(), [])
                 except RuntimeError:
                     pass
-            result = await pm.adecide({}, RunState(goal="t"), [])
+            result = await pm.adecide({}, _seed_state(), [])
             return result
 
         result = asyncio.run(go())
-        self.assertEqual(result.content, "ok")
+        self.assertEqual(result.text, "ok")
         # Circuit still closed (didn't hit threshold of 5)
         self.assertEqual(cb.state, CircuitState.CLOSED)
 
