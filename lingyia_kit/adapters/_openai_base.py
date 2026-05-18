@@ -7,11 +7,13 @@ LM Studio, and any other provider that conforms to the same shape.
 Implementation notes:
 - Pure ``httpx`` client. We deliberately do not depend on the ``openai`` SDK,
   so the only required wire-level dependency is HTTP+JSON.
-- Conversation history is reconstructed from ``RunState.observations`` on
-  every turn. Each ``tool_result`` observation carries ``tool_args``, which
-  lets us rebuild the matching assistant ``tool_calls`` message.
-- Parallel tool calls in a single iteration are collapsed into one assistant
-  turn followed by N tool messages, matching the OpenAI protocol.
+- v0.2 contract: conversation history is read directly from
+  ``RunState.messages`` (Anthropic-style ContentBlocks). Tool results live
+  inside user-role messages as ``ToolResultBlock`` and are translated to
+  OpenAI's separate ``role="tool"`` messages here.
+- Parallel tool calls in a single iteration are emitted as one assistant
+  turn carrying multiple ``tool_calls`` followed by N tool messages,
+  matching the OpenAI protocol.
 """
 from __future__ import annotations
 
@@ -20,8 +22,16 @@ from typing import Any, Mapping, Optional, Sequence
 
 import httpx
 
-from lingyia_core import Decision, RunState, ToolCall
-from lingyia_core.state import ModelUsage
+from lingyia_core import Decision, RunState
+from lingyia_core.blocks import (
+    ImageBlock,
+    Role,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    block_to_dict,
+)
+from lingyia_core.state import DecisionKind, ModelUsage
 
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -104,61 +114,85 @@ class OpenAICompatibleModel:
         context: Mapping[str, Any],
         state: RunState,
     ) -> list[dict[str, Any]]:
-        system_prompt = context.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": state.goal},
-        ]
+        """v0.2: read state.messages, translate to OpenAI chat completion format."""
+        out: list[dict[str, Any]] = []
+        for msg in state.messages:
+            if msg.role == Role.SYSTEM:
+                text = "".join(b.text for b in msg.content if isinstance(b, TextBlock))
+                out.append({"role": "system", "content": text})
 
-        # Group tool_result observations by iteration so each iteration becomes
-        # exactly one assistant turn + N tool result messages.
-        by_iter: dict[int, list[Any]] = {}
-        for obs in state.observations:
-            if obs.kind != "tool_result":
-                continue
-            by_iter.setdefault(obs.iteration, []).append(obs)
+            elif msg.role == Role.USER:
+                # User messages may contain TextBlock OR ToolResultBlock
+                # (Anthropic style). OpenAI requires tool results as separate
+                # role="tool" messages, so we split them out here.
+                text_parts: list[Any] = []
+                for block in msg.content:
+                    if isinstance(block, TextBlock):
+                        text_parts.append(block.text)
+                    elif isinstance(block, ToolResultBlock):
+                        out.append({
+                            "role": "tool",
+                            "tool_call_id": block.tool_use_id,
+                            "content": self._flatten_tool_result(block.content),
+                        })
+                    elif isinstance(block, ImageBlock):
+                        text_parts.append(self._image_to_openai_part(block))
+                if text_parts:
+                    if all(isinstance(p, str) for p in text_parts):
+                        out.append({"role": "user", "content": "\n".join(text_parts)})
+                    else:
+                        # Has images — structured content array
+                        structured: list[dict[str, Any]] = []
+                        for p in text_parts:
+                            if isinstance(p, str):
+                                structured.append({"type": "text", "text": p})
+                            else:
+                                structured.append(p)
+                        out.append({"role": "user", "content": structured})
 
-        for iter_num in sorted(by_iter.keys()):
-            results = by_iter[iter_num]
-            tool_calls_payload = []
-            for i, r in enumerate(results):
-                payload = r.payload
-                call_id = payload.get("call_id") or f"call_{iter_num}_{i}"
-                tool_calls_payload.append({
-                    "id": call_id,
-                    "type": "function",
-                    "function": {
-                        "name": payload["tool_name"],
-                        "arguments": json.dumps(payload.get("tool_args", {}), ensure_ascii=False),
-                    },
-                })
-            messages.append({
-                "role": "assistant",
-                "content": None,
-                "tool_calls": tool_calls_payload,
-            })
-            for r in results:
-                payload = r.payload
-                call_id = payload.get("call_id") or ""
-                content = json.dumps(
-                    {
-                        "ok": payload.get("ok", True),
-                        "output": payload.get("output"),
-                        "error": payload.get("error", ""),
-                    },
-                    default=str,
-                    ensure_ascii=False,
-                )
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "content": content,
-                })
+            elif msg.role == Role.ASSISTANT:
+                text = "".join(b.text for b in msg.content if isinstance(b, TextBlock))
+                tool_uses = [b for b in msg.content if isinstance(b, ToolUseBlock)]
+                entry: dict[str, Any] = {"role": "assistant"}
+                entry["content"] = text or None
+                if tool_uses:
+                    entry["tool_calls"] = [
+                        {
+                            "id": tu.id,
+                            "type": "function",
+                            "function": {
+                                "name": tu.name,
+                                "arguments": json.dumps(dict(tu.input), ensure_ascii=False),
+                            },
+                        }
+                        for tu in tool_uses
+                    ]
+                out.append(entry)
+        return out
 
-        for fb in state.feedback:
-            messages.append({"role": "user", "content": f"[feedback] {fb}"})
+    def _flatten_tool_result(self, content: Any) -> str:
+        """OpenAI tool message content is a string; flatten nested blocks if any."""
+        if isinstance(content, str):
+            return content
+        text_parts: list[str] = []
+        json_fallback: list[str] = []
+        for block in content:
+            if isinstance(block, TextBlock):
+                text_parts.append(block.text)
+            else:
+                json_fallback.append(json.dumps(block_to_dict(block), ensure_ascii=False))
+        return "\n".join(text_parts + json_fallback)
 
-        return messages
+    def _image_to_openai_part(self, block: ImageBlock) -> dict[str, Any]:
+        """Convert ImageBlock to OpenAI vision content part."""
+        if block.source.url:
+            return {"type": "image_url", "image_url": {"url": block.source.url}}
+        return {
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:{block.source.media_type};base64,{block.source.data}",
+            },
+        }
 
     def _build_tool_schemas(self, tools: Sequence[Any]) -> list[dict[str, Any]]:
         schemas = []
@@ -179,19 +213,24 @@ class OpenAICompatibleModel:
 
     # Response parsing ---------------------------------------------------
 
-    def _parse_response(self, body: Mapping[str, Any]) -> Decision:
-        choices = body.get("choices") or []
+    def _parse_response(self, data: Mapping[str, Any]) -> Decision:
+        """Parse OpenAI chat completion response into a v0.2 Decision."""
+        choices = data.get("choices") or []
         if not choices:
-            raise RuntimeError(f"empty choices in response: {body}")
+            return Decision.final_answer("")
         msg = choices[0].get("message") or {}
-        usage = self._parse_usage(body)
+        usage = self._parse_usage(data)
 
-        tool_calls = msg.get("tool_calls") or []
-        if tool_calls:
-            calls = []
-            for tc in tool_calls:
+        text_content = msg.get("content") or ""
+        tool_calls_raw = msg.get("tool_calls") or []
+
+        content_blocks: list[Any] = []
+        if text_content:
+            content_blocks.append(TextBlock(text=text_content))
+
+        if tool_calls_raw:
+            for tc in tool_calls_raw:
                 fn = tc.get("function") or {}
-                name = fn.get("name") or ""
                 raw_args = fn.get("arguments")
                 if isinstance(raw_args, str):
                     try:
@@ -205,18 +244,20 @@ class OpenAICompatibleModel:
                     args = raw_args
                 else:
                     args = {}
-                calls.append(ToolCall(name=name, args=args, call_id=tc.get("id") or ""))
-            if calls:
-                return Decision(
-                    kind=Decision.call_tools(tuple(calls)).kind,
-                    tool_calls=tuple(calls),
-                    usage=usage,
-                )
+                content_blocks.append(ToolUseBlock(
+                    id=tc.get("id") or "",
+                    name=fn.get("name") or "",
+                    input=args,
+                ))
+            return Decision(
+                kind=DecisionKind.CALL_TOOL,
+                content=tuple(content_blocks),
+                usage=usage,
+            )
 
-        content = msg.get("content") or ""
         return Decision(
-            kind=Decision.final_answer(content).kind,
-            content=content,
+            kind=DecisionKind.FINAL_ANSWER,
+            content=tuple(content_blocks) if content_blocks else (TextBlock(text=""),),
             usage=usage,
         )
 
