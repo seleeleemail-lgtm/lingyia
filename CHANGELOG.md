@@ -14,6 +14,118 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - First-party `LangfuseSink` shortcut
 - Example projects in `examples/` for legal / code / support domains
 
+## [0.2.0-alpha] — 2026-05-18 — Message Contract Reset
+
+This is a **breaking** release. The internal state contract was rebuilt from
+the ground up around a message log (Anthropic-style content blocks) instead of
+the v0.1 `goal + observations + feedback` triple. v0.1 snapshots are not
+loadable directly — see Migration below.
+
+### BREAKING CHANGES
+- `RunState`: removed `goal: str`, `observations: list[Observation]`,
+  `feedback: list[str]`. Added `messages: list[Message]` as the sole source
+  of truth for run history. `schema_version` bumped 1 → 2. Loading a v0.1
+  snapshot via `RunState.from_dict` raises `UnknownSchemaVersionError`.
+- `Decision.content`: changed from `str` to `tuple[ContentBlock, ...]`. Use
+  `decision.text` for the flat string and `decision.tool_calls` for the
+  derived `ToolUseBlock` tuple.
+- `Model` protocol: now requires a `capabilities: ModelCapabilities`
+  property. Custom Model implementations must declare what they accept/emit.
+- `ToolContext`: removed `goal: str`, added `messages: tuple[Message, ...]`.
+  Tools that read goal text must now read it off the first user message.
+
+### Added
+- `lingyia_core.blocks`: `ContentBlock` discriminated union covering
+  `TextBlock`, `ToolUseBlock`, `ToolResultBlock`, `ImageBlock`, `AudioBlock`,
+  and `ThinkingBlock`. `block_to_dict` / `block_from_dict` round-trip
+  helpers, plus `Role` and `BlockKind` enums.
+- `lingyia_core.message.Message`: dataclass with `role: Role` and
+  `content: tuple[ContentBlock, ...]`. Frozen, JSON-serializable.
+- `lingyia_core.capability`: `ModelCapabilities` dataclass (accepted/emitted
+  `BlockKind` sets, `max_context_tokens`, etc.), `CapabilityMismatchError`,
+  `CapabilityPolicy` protocol, and `FailFastCapabilityPolicy` default.
+  Runtime checks model capabilities against the planned decision before
+  each `adecide` call.
+- `Harness.system_prompt` and `Harness.metadata` fields. The system prompt
+  is auto-injected as a `SYSTEM` message at run start.
+- AnthropicModel: rewritten with native `ContentBlock` ↔ Anthropic API block
+  mapping (still raw `httpx`, no `anthropic` SDK dependency). Supports
+  `ThinkingBlock` round-trip.
+- Per-model capabilities on OpenAI / SiliconFlow / MiniMax / Anthropic
+  adapters with real context windows (GLM-5.1 = 205K, Kimi-K2.6 = 200K,
+  DeepSeek-V4 = 128K, MiniMax-M2 = 200K, Claude family, gpt-4o, etc.).
+- `lingyia_kit.migrations.v01_to_v02.migrate_state_dict`: best-effort
+  v0.1 → v0.2 snapshot dict conversion. Lossy on observation timestamps
+  and the exact interleaving of `feedback` strings — see the docstring for
+  caveats.
+- `lingyia_kit.compactors.token_aware.TokenAwareCompactor`: rewritten for
+  messages — preserves the `SYSTEM` message, keeps the last N turn pairs,
+  and enforces `tool_use` ↔ `tool_result` adjacency so the conversation
+  never desyncs after compaction.
+- `lingyia_core` now re-exports `Message`, `Role`, `BlockKind`,
+  `ContentBlock`, `TextBlock`, `ToolUseBlock`, `ToolResultBlock`,
+  `ImageBlock`, `AudioBlock`, `ThinkingBlock`, `ModelCapabilities`,
+  `CapabilityMismatchError`, `CapabilityPolicy`,
+  `FailFastCapabilityPolicy`, and `UnknownSchemaVersionError` at the
+  package root.
+
+### Changed
+- `Runtime`: full message-lifecycle implementation. Appends an `ASSISTANT`
+  message after every `adecide`; appends a `USER` message containing a
+  `ToolResultBlock` after every tool execution; appends a `USER` message
+  with a `TextBlock` for guard / validator / approval-reject /
+  human-resume feedback. Capability check runs before `adecide` via the
+  configured `CapabilityPolicy`.
+- `Runtime.arun` / `Runtime.astream` now accept either a `str` (auto-wrapped
+  to a single `USER` message) or a pre-built `list[Message]`. The legacy
+  `goal=` keyword is still accepted as a backwards-compat shim.
+- `lingyia_kit.patterns.react`: simplified — no goal/observations context
+  builder. Just `tools + system_prompt + metadata + permissions`.
+
+### Removed
+- `TruncatingCompactor` (it operated on v0.1 `observations`/`feedback`).
+- v0.1 `RunState` fields: `goal`, `observations`, `feedback`.
+- `RedactedBlock` was kept out of the `ContentBlock` union — redaction now
+  lives in the telemetry sink layer where it belongs.
+- AnthropicModel's v0.1 "reconstruct multi-turn assistant tool_calls from
+  observations" reassembly logic. No longer needed; messages are the
+  source of truth.
+
+### Deprecated
+- `Observation` dataclass: still exported from `lingyia_core` for
+  type-import compatibility but is no longer used by `Runtime` or
+  `RunState`. Slated for removal in v0.3.
+
+### Migration
+For callers persisting v0.1 snapshots:
+
+```python
+from lingyia_kit.migrations.v01_to_v02 import migrate_state_dict
+from lingyia_core import RunState
+
+v02_dict = migrate_state_dict(v01_snapshot_dict)
+state = RunState.from_dict(v02_dict)
+```
+
+For programmatic v0.1 callers, construct a `RunState` directly:
+
+```python
+from lingyia_core import RunState, Message, Role, TextBlock
+
+state = RunState(
+    messages=[Message(role=Role.USER, content=(TextBlock(text=goal),))],
+)
+```
+
+The `Runtime.arun(harness, goal="...")` shim still works for the common
+"start a run from a string goal" case.
+
+### Testing
+138/138 tests green across `lingyia_core` and `lingyia_kit` on the v0.2-α
+branch. All adapters (OpenAI / SiliconFlow / MiniMax / Anthropic),
+checkpointers, compactors, resilience, telemetry, tools, and streaming
+suites migrated to the new contract.
+
 ## [0.1.0] — 2026-05-15
 
 Initial public release.

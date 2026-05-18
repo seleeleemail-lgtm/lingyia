@@ -19,6 +19,7 @@ import sys
 import time
 
 from lingyia_core import Runtime
+from lingyia_core.blocks import ToolResultBlock
 from lingyia_core.defaults.telemetry import NoopTelemetry
 from lingyia_kit import (
     AnthropicModel,
@@ -66,16 +67,18 @@ async def run_once(provider: str, model_name: str | None, goal: str, max_iter: i
     )
 
     started = time.perf_counter()
-    result = await runtime.arun(harness, goal=goal)
+    result = await runtime.arun(harness, goal)
     elapsed = time.perf_counter() - started
 
-    tool_calls = sum(
-        1 for o in result.state.observations if o.kind == "tool_result"
-    )
-    failed = sum(
-        1 for o in result.state.observations
-        if o.kind == "tool_result" and not o.payload.get("ok", True)
-    )
+    # v0.2: tool results live as ToolResultBlock inside user-role messages.
+    tool_result_blocks = [
+        b
+        for m in result.state.messages
+        for b in m.content
+        if isinstance(b, ToolResultBlock)
+    ]
+    tool_calls = len(tool_result_blocks)
+    failed = sum(1 for b in tool_result_blocks if b.is_error)
     return {
         "provider": provider,
         "model": model_name or getattr(cls, "DEFAULT_MODEL", "default"),
