@@ -17,9 +17,10 @@ When NOT to use:
 - For long-running async waits (use checkpoint + resume instead).
 
 Cost / state model:
-- The sub-agent's state is fully independent: separate run_id, observations,
+- The sub-agent's state is fully independent: separate run_id, messages,
   trace, checkpoint. The parent only sees the sub-agent's final summary +
-  cost in the tool result.
+  cost in the tool result, surfaced as a ToolResultBlock in the parent's
+  transcript.
 - The parent's cost accumulator gets a delta equal to the sub-agent's
   total cost (so per-run budgets work across nested agents).
 - Telemetry events from the sub-agent flow through the sub-agent's own sink,
@@ -103,7 +104,7 @@ def sub_agent_tool(
                 error=f"missing or empty '{goal_arg}'",
             )
 
-        sub_result = await runtime.arun(harness, goal=sub_goal)
+        sub_result = await runtime.arun(harness, sub_goal)
         sub_state = sub_result.state
         cost = float(sub_state.metadata.get("cost_usd", 0.0) or 0.0)
         tokens = dict(sub_state.metadata.get("tokens", {}) or {})
@@ -125,13 +126,13 @@ def sub_agent_tool(
             error="" if ok else (sub_result.reason or "sub-agent did not complete"),
         )
 
-        # Propagate cost back to the parent by attaching a synthetic ModelUsage
-        # on the tool result is not how the loop accumulates cost — cost lives
-        # on Decision.usage. The simplest correct mechanism: parent harness
-        # can read the sub-agent's cost from the observation payload and
-        # decide what to do. For automatic accumulation we recommend the
-        # parent runtime's cost_estimator to inspect 'sub_cost_usd' in
-        # observation payloads. This tool surfaces it explicitly.
+        # Cost propagation note: the runtime accumulates cost from
+        # Decision.usage during the model loop, not from tool results. The
+        # parent's harness/validator can read the sub-agent's cost off the
+        # ToolResultBlock content (this dict's "cost_usd" key) and decide
+        # what to do. For automatic accumulation we recommend the parent
+        # runtime's cost_estimator hook to inspect the tool's structured
+        # result. This tool surfaces it explicitly.
         return result
 
     return Tool.from_async(

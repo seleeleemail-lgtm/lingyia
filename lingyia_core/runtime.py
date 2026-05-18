@@ -7,7 +7,7 @@ Harness owns ``what to run``: tools, validator, guard, context builder.
 
 v0.2-α message contract reset:
 - ``arun``/``astream`` accept ``str`` (auto-wrapped as USER text Message) or
-  ``list[Message]`` directly. Legacy ``goal=`` keyword still accepted.
+  ``list[Message]`` directly. The v0.1 ``goal=`` keyword has been removed.
 - Conversation history lives on ``state.messages``. Observations/feedback
   are encoded as Messages (USER role with TextBlock or ToolResultBlock).
 - ``Harness.system_prompt`` (optional) is injected as the first SYSTEM
@@ -70,13 +70,31 @@ class ValidationResult:
 
 
 def _default_context_builder(state: RunState, tools: Sequence[Tool]) -> Mapping[str, Any]:
-    """v0.2: messages live on state directly; context exposes iteration + tools schema."""
+    """Default context per spec §10.
+
+    Returns:
+        - system_prompt: pulled from any SYSTEM-role message at the head of
+          ``state.messages`` (joined TextBlocks). Adapters that carry the
+          system prompt outside the messages array (e.g. Anthropic) can use
+          this directly; adapters that read messages will see it twice
+          unless they filter the SYSTEM role themselves.
+        - tools_schema: JSON-schema-shaped list of tool descriptors.
+        - metadata: free-form state.metadata dict (mutable copy).
+    """
+    system_prompt = "\n".join(
+        b.text
+        for m in state.messages
+        if m.role == Role.SYSTEM
+        for b in m.content
+        if isinstance(b, TextBlock)
+    )
     return {
-        "iteration": state.iteration,
-        "tools": [
+        "system_prompt": system_prompt,
+        "tools_schema": [
             {"name": t.name, "description": t.description, "input_schema": dict(t.input_schema)}
             for t in tools
         ],
+        "metadata": dict(state.metadata),
     }
 
 
@@ -227,25 +245,21 @@ class Runtime:
         self,
         harness: Harness,
         messages: Union[list[Message], str, None] = None,
-        *,
-        goal: Optional[str] = None,
     ) -> RunResult:
         """Synchronous entry point. Internally drives the async loop."""
-        return asyncio.run(self.arun(harness, messages, goal=goal))
+        return asyncio.run(self.arun(harness, messages))
 
     async def arun(
         self,
         harness: Harness,
         messages: Union[list[Message], str, None] = None,
-        *,
-        goal: Optional[str] = None,
     ) -> RunResult:
         """v0.2: accept ``str`` (auto-wrapped) or ``list[Message]``.
 
-        Legacy ``goal=`` keyword is accepted for backwards compatibility and
-        is treated identically to passing a str positionally.
+        The v0.1 ``goal=`` keyword has been removed in v0.2-α. Pass the seed
+        positionally as a str or list[Message].
         """
-        seed = self._coerce_seed(messages, goal)
+        seed = self._coerce_seed(messages)
         state = RunState(messages=seed)
         return await self._continue(harness, state)
 
@@ -253,8 +267,6 @@ class Runtime:
         self,
         harness: Harness,
         messages: Union[list[Message], str, None] = None,
-        *,
-        goal: Optional[str] = None,
     ):
         """Run an agent and yield events as they happen.
 
@@ -272,7 +284,7 @@ class Runtime:
         original_telemetry = self.telemetry
         try:
             self.telemetry = _ChainedSink(original_telemetry, _QueueSink(queue))
-            run_task = _asyncio.create_task(self.arun(harness, messages, goal=goal))
+            run_task = _asyncio.create_task(self.arun(harness, messages))
             while True:
                 getter = _asyncio.create_task(queue.get())
                 done, _ = await _asyncio.wait(
@@ -656,17 +668,14 @@ class Runtime:
     @staticmethod
     def _coerce_seed(
         messages: Union[list[Message], str, None],
-        goal: Optional[str],
     ) -> list[Message]:
         """Normalize arun/run input into a list[Message].
 
-        Accepts (in order of precedence):
+        Accepts:
         - explicit ``messages: list[Message]``
         - ``messages: str`` (wrapped as USER TextBlock)
-        - legacy ``goal: str`` keyword (wrapped as USER TextBlock)
+        - ``None`` (caller must seed state separately, e.g. via resume)
         """
-        if messages is None and goal is not None:
-            return [_user_text_message(goal)]
         if isinstance(messages, str):
             return [_user_text_message(messages)]
         if isinstance(messages, list):

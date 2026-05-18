@@ -54,7 +54,7 @@ class StreamingTests(unittest.TestCase):
         async def collect():
             events = []
             final = None
-            async for kind, payload in rt.astream(harness, goal="t"):
+            async for kind, payload in rt.astream(harness, "t"):
                 if kind == "event":
                     events.append(payload)
                 elif kind == "final":

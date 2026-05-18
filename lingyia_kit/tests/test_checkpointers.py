@@ -344,7 +344,7 @@ class SqliteCheckpointerTests(unittest.TestCase):
             rt_a = Runtime.dev(model=FixedDecisionModel(approval_decision))
             from lingyia_core.defaults.telemetry import NoopTelemetry
             rt_a.telemetry = NoopTelemetry()
-            paused = await rt_a.arun(harness, goal="send approval email")
+            paused = await rt_a.arun(harness, "send approval email")
             self.assertEqual(paused.status, RunStatus.APPROVAL_REQUIRED)
 
             # Save snapshot

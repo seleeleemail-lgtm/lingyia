@@ -118,7 +118,7 @@ class CostAccumulationTests(unittest.TestCase):
 
         rt = Runtime.dev(model=OneShotModel(), max_iterations=2)
         rt.telemetry = NoopTelemetry()
-        result = asyncio.run(rt.arun(self._harness(), goal="t"))
+        result = asyncio.run(rt.arun(self._harness(), "t"))
         # final_answer ends loop on iter 0; only one decision was made
         self.assertAlmostEqual(result.state.metadata["cost_usd"], 0.15, places=6)
         self.assertEqual(result.state.metadata["tokens"]["prompt"], 1_000_000)
@@ -146,7 +146,7 @@ class CostAccumulationTests(unittest.TestCase):
 
         rt = Runtime.dev(model=RepeatingModel(), max_iterations=10, max_cost_usd=0.20)
         rt.telemetry = NoopTelemetry()
-        result = asyncio.run(rt.arun(self._harness(), goal="t"))
+        result = asyncio.run(rt.arun(self._harness(), "t"))
         self.assertEqual(result.status, RunStatus.FAILED)
         self.assertIn("budget exceeded", result.reason)
         self.assertGreater(result.state.metadata["cost_usd"], 0.20)
@@ -183,7 +183,7 @@ class CostAccumulationTests(unittest.TestCase):
             cost_estimator=estimator,
         )
         rt.telemetry = NoopTelemetry()
-        result = asyncio.run(rt.arun(self._harness(), goal="t"))
+        result = asyncio.run(rt.arun(self._harness(), "t"))
         self.assertAlmostEqual(result.state.metadata["cost_usd"], 0.15, places=6)
 
 

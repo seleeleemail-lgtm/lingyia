@@ -6,7 +6,7 @@ Example:
 
     runtime = Runtime.dev(model=...)
     harness = Harness(tools=[Tool.from_async(...)], validator=...)
-    result = runtime.run(harness, goal="...")
+    result = runtime.run(harness, "...")
 """
 from .core import (
     Checkpointer,

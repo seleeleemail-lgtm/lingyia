@@ -104,7 +104,7 @@ class LoadTests(unittest.TestCase):
             )
 
             async def run_one(i):
-                result = await rt.arun(harness, goal=f"task-{i}")
+                result = await rt.arun(harness, f"task-{i}")
                 await ck.asave(result.state.run_id, result.state)
                 return result
 

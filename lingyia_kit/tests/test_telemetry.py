@@ -271,7 +271,7 @@ class TelemetryIntegrationTests(unittest.TestCase):
         )
         rt = Runtime.dev(model=OneTurnModel())
         rt.telemetry = CaptureSink()
-        result = asyncio.run(rt.arun(harness, goal="g"))
+        result = asyncio.run(rt.arun(harness, "g"))
 
         self.assertTrue(captured, "no telemetry was emitted")
         run_id = result.state.run_id

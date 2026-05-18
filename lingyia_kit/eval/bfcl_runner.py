@@ -29,6 +29,8 @@ from lingyia_core import (
     ToolContext,
     ToolResult,
 )
+from lingyia_core.blocks import Role, TextBlock
+from lingyia_core.message import Message
 
 
 BfclSplit = str  # "simple" | "parallel" | "multiple"
@@ -284,7 +286,7 @@ async def _run_one(
     user_msg = question["question"][0][0]["content"]
     tools = [_make_noop_tool(f) for f in question["function"]]
 
-    state = RunState(goal=user_msg)
+    state = RunState(messages=[Message(role=Role.USER, content=(TextBlock(text=user_msg),))])
     started = time.perf_counter()
     try:
         decision = await model.adecide(
