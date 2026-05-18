@@ -8,9 +8,11 @@ import unittest
 import httpx
 
 from lingyia_core import (
+    BlockKind,
     Decision,
     Harness,
     Message,
+    ModelCapabilities,
     Role,
     Runtime,
     RunStatus,
@@ -21,6 +23,12 @@ from lingyia_core import (
     ValidationResult,
 )
 from lingyia_core.state import ModelUsage
+
+
+_FAKE_CAPS = ModelCapabilities(
+    model_id="fake",
+    accepts=frozenset({BlockKind.TEXT, BlockKind.TOOL_USE, BlockKind.TOOL_RESULT}),
+)
 from lingyia_core.defaults.telemetry import NoopTelemetry
 from lingyia_kit.adapters._openai_base import OpenAICompatibleModel
 from lingyia_kit.pricing import estimate_cost, register_pricing
@@ -103,6 +111,8 @@ class CostAccumulationTests(unittest.TestCase):
         )
 
         class OneShotModel:
+            capabilities = _FAKE_CAPS
+
             async def adecide(self, ctx, state, tools):
                 return d1
 
@@ -129,6 +139,8 @@ class CostAccumulationTests(unittest.TestCase):
         )
 
         class RepeatingModel:
+            capabilities = _FAKE_CAPS
+
             async def adecide(self, ctx, state, tools):
                 return expensive
 
@@ -152,6 +164,8 @@ class CostAccumulationTests(unittest.TestCase):
         )
 
         class OneShotModel:
+            capabilities = _FAKE_CAPS
+
             async def adecide(self, ctx, state, tools):
                 return decision
 

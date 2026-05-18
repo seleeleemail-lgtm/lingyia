@@ -230,13 +230,22 @@ class TelemetryIntegrationTests(unittest.TestCase):
 
     def test_runtime_stamps_run_id_on_every_event(self):
         from lingyia_core import (
+            BlockKind,
             Decision,
             Harness,
+            ModelCapabilities,
             Runtime,
             Tool,
             ToolResult,
             ToolUseBlock,
             ValidationResult,
+        )
+
+        fake_caps = ModelCapabilities(
+            model_id="fake",
+            accepts=frozenset({
+                BlockKind.TEXT, BlockKind.TOOL_USE, BlockKind.TOOL_RESULT,
+            }),
         )
 
         captured: list[TelemetryEvent] = []
@@ -246,6 +255,8 @@ class TelemetryIntegrationTests(unittest.TestCase):
                 captured.append(event)
 
         class OneTurnModel:
+            capabilities = fake_caps
+
             async def adecide(self, context, state, tools):
                 return Decision.call_tools([
                     ToolUseBlock(id="call-1", name="noop", input={}),

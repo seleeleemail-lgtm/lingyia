@@ -8,8 +8,10 @@ import unittest
 from pathlib import Path
 
 from lingyia_core import (
+    BlockKind,
     Decision,
     Harness,
+    ModelCapabilities,
     Role,
     Runtime,
     Tool,
@@ -19,6 +21,12 @@ from lingyia_core import (
     ValidationResult,
 )
 from lingyia_core.defaults.telemetry import NoopTelemetry
+
+
+_FAKE_CAPS = ModelCapabilities(
+    model_id="fake",
+    accepts=frozenset({BlockKind.TEXT, BlockKind.TOOL_USE, BlockKind.TOOL_RESULT}),
+)
 from lingyia_kit.redaction import RegexRedactor
 from lingyia_kit.secrets import (
     ChainSecretBackend,
@@ -146,6 +154,8 @@ def _harness_with_restricted_tool(granted: frozenset) -> Harness:
 
 
 class _CallToolModel:
+    capabilities = _FAKE_CAPS
+
     async def adecide(self, ctx, state, tools):
         return Decision.call_tools([
             ToolUseBlock(id="call-1", name="dangerous", input={}),

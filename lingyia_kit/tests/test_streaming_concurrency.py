@@ -6,8 +6,10 @@ import time
 import unittest
 
 from lingyia_core import (
+    BlockKind,
     Decision,
     Harness,
+    ModelCapabilities,
     Runtime,
     RunStatus,
     Tool,
@@ -15,6 +17,12 @@ from lingyia_core import (
     ToolResult,
     ToolUseBlock,
     ValidationResult,
+)
+
+
+_FAKE_CAPS = ModelCapabilities(
+    model_id="fake",
+    accepts=frozenset({BlockKind.TEXT, BlockKind.TOOL_USE, BlockKind.TOOL_RESULT}),
 )
 from lingyia_core.defaults.telemetry import NoopTelemetry
 from lingyia_core.executor import ToolExecutor
@@ -26,6 +34,8 @@ from lingyia_core.executor import ToolExecutor
 class StreamingTests(unittest.TestCase):
     def test_astream_yields_events_then_final(self):
         class OneTurnModel:
+            capabilities = _FAKE_CAPS
+
             async def adecide(self, ctx, state, tools):
                 return Decision.call_tools([
                     ToolUseBlock(id="call-1", name="noop", input={}),

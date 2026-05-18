@@ -13,9 +13,11 @@ from typing import Any, Optional
 from unittest.mock import AsyncMock, MagicMock
 
 from lingyia_core import (
+    BlockKind,
     Decision,
     Harness,
     Message,
+    ModelCapabilities,
     Role,
     RunState,
     RunStatus,
@@ -29,6 +31,12 @@ from lingyia_core import (
 )
 from lingyia_core.defaults.telemetry import NoopTelemetry
 from lingyia_core.state import RUN_STATE_SCHEMA_VERSION
+
+
+_FAKE_CAPS = ModelCapabilities(
+    model_id="fake",
+    accepts=frozenset({BlockKind.TEXT, BlockKind.TOOL_USE, BlockKind.TOOL_RESULT}),
+)
 
 
 # Helpers ----------------------------------------------------------------
@@ -270,6 +278,8 @@ class SubAgentToolTests(unittest.TestCase):
         a final answer summarizing it."""
 
         class _TwoTurnModel:
+            capabilities = _FAKE_CAPS
+
             def __init__(self):
                 self.n = 0
 
@@ -342,6 +352,8 @@ class SubAgentToolTests(unittest.TestCase):
         )
 
         class _ParentModel:
+            capabilities = _FAKE_CAPS
+
             def __init__(self):
                 self.n = 0
 

@@ -21,6 +21,7 @@ from lingyia_core import (
     DecisionKind,
     Interrupt,
     InterruptReason,
+    ModelCapabilities,
     RunState,
     RunStatus,
     Runtime,
@@ -40,6 +41,8 @@ from lingyia_kit.checkpointers import SqliteCheckpointer
 
 class FixedDecisionModel:
     """Async model double that yields a scripted sequence of decisions."""
+
+    capabilities = ModelCapabilities(model_id="fake")
 
     def __init__(self, *decisions):
         self.decisions = list(decisions)

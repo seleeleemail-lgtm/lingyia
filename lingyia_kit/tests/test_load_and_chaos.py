@@ -15,8 +15,10 @@ import unittest
 from pathlib import Path
 
 from lingyia_core import (
+    BlockKind,
     Decision,
     Harness,
+    ModelCapabilities,
     RetryPolicy,
     Role,
     Runtime,
@@ -30,6 +32,12 @@ from lingyia_core import (
 )
 from lingyia_core.defaults.telemetry import NoopTelemetry
 from lingyia_kit.checkpointers import SqliteCheckpointer
+
+
+_FAKE_CAPS = ModelCapabilities(
+    model_id="fake",
+    accepts=frozenset({BlockKind.TEXT, BlockKind.TOOL_USE, BlockKind.TOOL_RESULT}),
+)
 
 
 def _first_user_text(state) -> str:
@@ -60,6 +68,8 @@ class LoadTests(unittest.TestCase):
         race conditions, no state corruption, all complete."""
 
         class _Model:
+            capabilities = _FAKE_CAPS
+
             async def adecide(self, ctx, state, tools):
                 return Decision.call_tools([
                     ToolUseBlock(
@@ -144,6 +154,8 @@ class ChaosTests(unittest.TestCase):
         )
 
         class _Model:
+            capabilities = _FAKE_CAPS
+
             async def adecide(self, ctx, state, tools):
                 return Decision.call_tools([
                     ToolUseBlock(id="flaky-1", name="flaky", input={}),
@@ -177,6 +189,8 @@ class ChaosTests(unittest.TestCase):
         does not crash."""
 
         class _BadModel:
+            capabilities = _FAKE_CAPS
+
             def __init__(self):
                 self.n = 0
 

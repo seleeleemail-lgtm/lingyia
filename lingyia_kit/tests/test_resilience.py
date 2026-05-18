@@ -5,7 +5,7 @@ import asyncio
 import time
 import unittest
 
-from lingyia_core import Decision, Message, Role, RunState, TextBlock
+from lingyia_core import Decision, Message, ModelCapabilities, Role, RunState, TextBlock
 from lingyia_kit.resilience import (
     CircuitBreaker,
     CircuitOpenError,
@@ -138,7 +138,12 @@ def _seed_state() -> RunState:
     return RunState(messages=[Message(role=Role.USER, content=(TextBlock(text="t"),))])
 
 
+_FAKE_CAPS = ModelCapabilities(model_id="fake")
+
+
 class _FlakyModel:
+    capabilities = _FAKE_CAPS
+
     def __init__(self):
         self.calls = 0
 
@@ -150,11 +155,15 @@ class _FlakyModel:
 
 
 class _AlwaysFailModel:
+    capabilities = _FAKE_CAPS
+
     async def adecide(self, *args, **kwargs):
         raise RuntimeError("always fail")
 
 
 class _OKModel:
+    capabilities = _FAKE_CAPS
+
     async def adecide(self, *args, **kwargs):
         return Decision.final_answer("ok")
 
