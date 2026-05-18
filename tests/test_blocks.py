@@ -1,0 +1,108 @@
+"""Tests for ContentBlock discriminated union (v0.2-α §4.2)."""
+import pytest
+
+from lingyia_core.blocks import (
+    Role, BlockKind, TextBlock, ToolUseBlock, ToolResultBlock,
+    ImageBlock, ImageSource, AudioBlock, AudioSource, ThinkingBlock,
+    block_to_dict, block_from_dict, UnknownBlockTypeError,
+)
+
+
+def test_role_enum_values():
+    assert Role.USER.value == "user"
+    assert Role.ASSISTANT.value == "assistant"
+    assert Role.SYSTEM.value == "system"
+    with pytest.raises(ValueError):
+        Role("tool")  # no TOOL role
+
+
+def test_block_kind_covers_all_blocks():
+    assert {bk.value for bk in BlockKind} == {
+        "text", "tool_use", "tool_result", "image", "audio", "thinking",
+    }
+
+
+def test_text_block_round_trip():
+    block = TextBlock(text="hello")
+    d = block_to_dict(block)
+    assert d == {"type": "text", "text": "hello"}
+    restored = block_from_dict(d)
+    assert restored == block
+
+
+def test_tool_use_block_round_trip():
+    block = ToolUseBlock(id="abc", name="weather", input={"city": "shanghai"})
+    d = block_to_dict(block)
+    assert d == {"type": "tool_use", "id": "abc", "name": "weather", "input": {"city": "shanghai"}}
+    restored = block_from_dict(d)
+    assert restored == block
+
+
+def test_tool_result_block_with_str_content():
+    block = ToolResultBlock(tool_use_id="abc", content="sunny 22C")
+    d = block_to_dict(block)
+    assert d == {"type": "tool_result", "tool_use_id": "abc", "content": "sunny 22C", "is_error": False}
+    restored = block_from_dict(d)
+    assert restored == block
+
+
+def test_tool_result_block_with_nested_blocks():
+    nested = (TextBlock(text="sunny"), TextBlock(text="22C"))
+    block = ToolResultBlock(tool_use_id="abc", content=nested, is_error=False)
+    d = block_to_dict(block)
+    assert d["content"] == [
+        {"type": "text", "text": "sunny"},
+        {"type": "text", "text": "22C"},
+    ]
+    restored = block_from_dict(d)
+    assert restored == block
+
+
+def test_image_block_url_source():
+    block = ImageBlock(source=ImageSource(url="https://example.com/x.png"))
+    d = block_to_dict(block)
+    assert d == {"type": "image", "source": {"url": "https://example.com/x.png", "data": "", "media_type": ""}}
+    assert block_from_dict(d) == block
+
+
+def test_image_block_data_source():
+    block = ImageBlock(source=ImageSource(data="iVBORw0KG...", media_type="image/png"))
+    assert block_from_dict(block_to_dict(block)) == block
+
+
+def test_image_source_requires_url_or_data():
+    with pytest.raises(ValueError, match="ImageSource requires url or data"):
+        ImageSource()
+
+
+def test_audio_source_requires_url_or_data():
+    with pytest.raises(ValueError, match="AudioSource requires url or data"):
+        AudioSource()
+
+
+def test_thinking_block_round_trip():
+    block = ThinkingBlock(thinking="let me think...", signature="abc123")
+    d = block_to_dict(block)
+    assert d == {"type": "thinking", "thinking": "let me think...", "signature": "abc123"}
+    assert block_from_dict(d) == block
+
+
+def test_unknown_block_type_raises():
+    with pytest.raises(UnknownBlockTypeError) as exc_info:
+        block_from_dict({"type": "video", "url": "..."})
+    assert "video" in str(exc_info.value)
+
+
+def test_missing_required_field_raises():
+    with pytest.raises(ValueError, match="missing required field"):
+        block_from_dict({"type": "text"})  # missing "text"
+
+
+def test_recursive_tool_result_depth_limit():
+    # Build content nested 9 deep — should reject at depth > 8
+    inner = TextBlock(text="bottom")
+    block = inner
+    for _ in range(9):
+        block = ToolResultBlock(tool_use_id="x", content=(block,))
+    with pytest.raises(ValueError, match="content depth exceeds 8"):
+        block_to_dict(block)
