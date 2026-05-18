@@ -35,6 +35,31 @@ from .core import (
     ValidationResult,
 )
 
+# v0.2 message/content abstractions
+from .blocks import (
+    AudioBlock,
+    AudioSource,
+    BlockKind,
+    ContentBlock,
+    ImageBlock,
+    ImageSource,
+    Role,
+    TextBlock,
+    ThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UnknownBlockTypeError,
+    block_from_dict,
+    block_to_dict,
+)
+from .capability import (
+    CapabilityMismatchError,
+    CapabilityPolicy,
+    FailFastCapabilityPolicy,
+    ModelCapabilities,
+)
+from .message import Message
+
 __all__ = [
     "Checkpointer",
     "Compactor",
@@ -60,4 +85,24 @@ __all__ = [
     "ToolResult",
     "ToolSchema",
     "ValidationResult",
+    # v0.2 message/content abstractions
+    "AudioBlock",
+    "AudioSource",
+    "BlockKind",
+    "ContentBlock",
+    "ImageBlock",
+    "ImageSource",
+    "Role",
+    "TextBlock",
+    "ThinkingBlock",
+    "ToolResultBlock",
+    "ToolUseBlock",
+    "UnknownBlockTypeError",
+    "block_from_dict",
+    "block_to_dict",
+    "CapabilityMismatchError",
+    "CapabilityPolicy",
+    "FailFastCapabilityPolicy",
+    "ModelCapabilities",
+    "Message",
 ]
