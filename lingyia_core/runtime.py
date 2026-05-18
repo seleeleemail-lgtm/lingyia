@@ -492,6 +492,17 @@ class Runtime:
                         state=state,
                         reason=verdict.question,
                     )
+                # Validator rejected the final answer with feedback. Mirror
+                # the tool-completion path (_maybe_finish_after_tools):
+                # inject the feedback as a USER turn and re-enter the loop
+                # so the model can revise its answer. Without this, callers
+                # have no way to push back on a wrong final answer short of
+                # raising — and the validator API explicitly exposes
+                # ``feedback`` for exactly this case.
+                if not verdict.done and verdict.feedback:
+                    state.messages.append(_user_text_message(verdict.feedback))
+                    state.iteration += 1
+                    continue
                 return RunResult(
                     status=RunStatus.COMPLETED,
                     state=state,
@@ -611,23 +622,70 @@ class Runtime:
         results = await asyncio.gather(*tasks)
 
         # Emit one ToolResultBlock per call in a single user-role Message,
-        # mirroring Anthropic's tool_result convention.
+        # mirroring Anthropic's tool_result convention. Output serialization
+        # follows spec §8 — see _serialize_tool_output().
         result_blocks: list[ToolResultBlock] = []
         for call, result in zip(ordered_calls, results):
-            payload = result.output if result.ok else result.error
-            if payload is None:
-                payload_text = "" if result.ok else "tool error"
+            if result.ok:
+                content = self._serialize_tool_output(result.output)
             else:
-                payload_text = payload if isinstance(payload, str) else str(payload)
+                content = result.error or "tool error"
             result_blocks.append(ToolResultBlock(
                 tool_use_id=call.call_id,
-                content=payload_text,
+                content=content,
                 is_error=not result.ok,
             ))
         state.messages.append(Message(
             role=Role.USER,
             content=tuple(result_blocks),
         ))
+
+    @staticmethod
+    def _serialize_tool_output(payload: Any) -> Any:
+        """Serialize a tool's raw output into ToolResultBlock.content per spec §8.
+
+        Rules:
+        - ``None`` → empty string
+        - ``str`` → kept as-is
+        - ``tuple[ContentBlock, ...]`` → preserved (rich content; tool author
+          opted into structured output)
+        - anything else (dict, list, int, dataclass, ...) → ``json.dumps(...,
+          ensure_ascii=False, default=str)``
+
+        Falling back to ``str()`` would turn dicts into Python repr — not
+        parseable as JSON by downstream LLMs. The ``default=str`` argument
+        gives a last-resort serialization for non-JSONable values (e.g.
+        Decimal, datetime) instead of raising mid-loop.
+        """
+        import json
+        from .blocks import (
+            AudioBlock,
+            ImageBlock,
+            TextBlock,
+            ThinkingBlock,
+            ToolResultBlock,
+            ToolUseBlock,
+        )
+
+        if payload is None:
+            return ""
+        if isinstance(payload, str):
+            return payload
+        # tuple[ContentBlock, ...] passthrough — preserves rich tool output
+        # so adapters can render multiple text/image parts in a single
+        # tool_result. Anything in the v0.2 ContentBlock union qualifies.
+        if isinstance(payload, tuple) and payload and all(
+            isinstance(b, (TextBlock, ToolUseBlock, ToolResultBlock,
+                           ImageBlock, AudioBlock, ThinkingBlock))
+            for b in payload
+        ):
+            return payload
+        try:
+            return json.dumps(payload, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            # Pathological case (e.g. circular ref): fall back to repr
+            # rather than crash the whole run.
+            return str(payload)
 
     async def _maybe_finish_after_tools(
         self,
