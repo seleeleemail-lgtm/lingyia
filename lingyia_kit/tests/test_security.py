@@ -10,9 +10,12 @@ from pathlib import Path
 from lingyia_core import (
     Decision,
     Harness,
+    Role,
     Runtime,
     Tool,
     ToolResult,
+    ToolResultBlock,
+    ToolUseBlock,
     ValidationResult,
 )
 from lingyia_core.defaults.telemetry import NoopTelemetry
@@ -144,7 +147,18 @@ def _harness_with_restricted_tool(granted: frozenset) -> Harness:
 
 class _CallToolModel:
     async def adecide(self, ctx, state, tools):
-        return Decision.call_tool("dangerous", {})
+        return Decision.call_tools([
+            ToolUseBlock(id="call-1", name="dangerous", input={}),
+        ])
+
+
+def _last_tool_result(result) -> ToolResultBlock:
+    """Find the most recent ToolResultBlock in state.messages."""
+    for msg in reversed(result.state.messages):
+        for block in msg.content:
+            if isinstance(block, ToolResultBlock):
+                return block
+    raise AssertionError("no ToolResultBlock in transcript")
 
 
 class ToolPermissionTests(unittest.TestCase):
@@ -155,11 +169,13 @@ class ToolPermissionTests(unittest.TestCase):
         rt = Runtime.dev(model=_CallToolModel(), max_iterations=2)
         rt.telemetry = NoopTelemetry()
         result = asyncio.run(rt.arun(harness, "do it"))
-        # Tool ran
-        self.assertTrue(any(
-            o.payload.get("ok") and o.payload.get("tool_name") == "dangerous"
-            for o in result.state.observations
-        ))
+        # Tool ran — find a successful ToolResultBlock
+        ok_results = [
+            b for m in result.state.messages
+            for b in m.content
+            if isinstance(b, ToolResultBlock) and not b.is_error
+        ]
+        self.assertTrue(ok_results, "no successful tool result found")
 
     def test_missing_permission_blocks_tool(self):
         # Grant only read perm; tool needs network.write
@@ -168,10 +184,10 @@ class ToolPermissionTests(unittest.TestCase):
         rt = Runtime.dev(model=_CallToolModel(), max_iterations=2)
         rt.telemetry = NoopTelemetry()
         result = asyncio.run(rt.arun(harness, "do it"))
-        last = result.state.observations[-1].payload
-        self.assertFalse(last["ok"])
-        self.assertIn("permission denied", last["error"])
-        self.assertIn("network.write", last["error"])
+        last = _last_tool_result(result)
+        self.assertTrue(last.is_error)
+        self.assertIn("permission denied", last.content)
+        self.assertIn("network.write", last.content)
 
     def test_granted_permission_allows_tool(self):
         harness = _harness_with_restricted_tool(
@@ -180,8 +196,8 @@ class ToolPermissionTests(unittest.TestCase):
         rt = Runtime.dev(model=_CallToolModel(), max_iterations=2)
         rt.telemetry = NoopTelemetry()
         result = asyncio.run(rt.arun(harness, "do it"))
-        last = result.state.observations[-1].payload
-        self.assertTrue(last["ok"])
+        last = _last_tool_result(result)
+        self.assertFalse(last.is_error)
 
 
 if __name__ == "__main__":

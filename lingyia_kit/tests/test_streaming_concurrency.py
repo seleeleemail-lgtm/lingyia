@@ -13,6 +13,7 @@ from lingyia_core import (
     Tool,
     ToolCall,
     ToolResult,
+    ToolUseBlock,
     ValidationResult,
 )
 from lingyia_core.defaults.telemetry import NoopTelemetry
@@ -26,7 +27,9 @@ class StreamingTests(unittest.TestCase):
     def test_astream_yields_events_then_final(self):
         class OneTurnModel:
             async def adecide(self, ctx, state, tools):
-                return Decision.call_tool("noop", {})
+                return Decision.call_tools([
+                    ToolUseBlock(id="call-1", name="noop", input={}),
+                ])
 
         def noop(args, ctx):
             return ToolResult(tool_name="noop", ok=True, output="x")
@@ -82,7 +85,7 @@ class ToolConcurrencyTests(unittest.TestCase):
         from lingyia_core import ToolContext
 
         async def go():
-            ctx = ToolContext(run_id="r", iteration=0, goal="g", metadata={})
+            ctx = ToolContext(run_id="r", iteration=0, messages=(), metadata={})
             return await asyncio.gather(*[
                 executor.execute(tool, ToolCall(name="slow", args={"i": i}), ctx)
                 for i in range(6)
@@ -110,7 +113,7 @@ class ToolConcurrencyTests(unittest.TestCase):
         from lingyia_core import ToolContext
 
         async def go():
-            ctx = ToolContext(run_id="r", iteration=0, goal="g", metadata={})
+            ctx = ToolContext(run_id="r", iteration=0, messages=(), metadata={})
             return await asyncio.gather(*[
                 executor.execute(tool, ToolCall(name="fast", args={}), ctx)
                 for _ in range(5)

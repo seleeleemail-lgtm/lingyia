@@ -235,6 +235,7 @@ class TelemetryIntegrationTests(unittest.TestCase):
             Runtime,
             Tool,
             ToolResult,
+            ToolUseBlock,
             ValidationResult,
         )
 
@@ -246,7 +247,9 @@ class TelemetryIntegrationTests(unittest.TestCase):
 
         class OneTurnModel:
             async def adecide(self, context, state, tools):
-                return Decision.call_tool("noop", {})
+                return Decision.call_tools([
+                    ToolUseBlock(id="call-1", name="noop", input={}),
+                ])
 
         def noop(args, ctx):
             return ToolResult(tool_name="noop", ok=True, output="x")
