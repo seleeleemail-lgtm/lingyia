@@ -4,21 +4,40 @@ Runtime owns ``how to run``: model turn, tool execution, guard checks,
 validator, interrupts, checkpoint calls, compaction, telemetry, retries.
 
 Harness owns ``what to run``: tools, validator, guard, context builder.
+
+v0.2-α message contract reset:
+- ``arun``/``astream`` accept ``str`` (auto-wrapped as USER text Message) or
+  ``list[Message]`` directly. Legacy ``goal=`` keyword still accepted.
+- Conversation history lives on ``state.messages``. Observations/feedback
+  are encoded as Messages (USER role with TextBlock or ToolResultBlock).
+- ``Harness.system_prompt`` (optional) is injected as the first SYSTEM
+  message before the model is called.
+- A ``CapabilityPolicy`` runs before each ``model.adecide()`` so message
+  block kinds are validated against ``model.capabilities`` (fail-fast by
+  default).
+- Tool execution converts ``ToolUseBlock`` → internal ``ToolCall`` for the
+  executor, then back to ``ToolResultBlock`` for the transcript.
 """
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence, Union
 
+from .blocks import Role, TextBlock, ToolResultBlock, ToolUseBlock
+from .capability import (
+    CapabilityPolicy,
+    FailFastCapabilityPolicy,
+    ModelCapabilities,
+)
 from .executor import RetryPolicy, Tool, ToolExecutor
+from .message import Message
 from .protocols import Checkpointer, Compactor, Model, TelemetrySink
 from .state import (
     Decision,
     DecisionKind,
     Interrupt,
     InterruptReason,
-    Observation,
     RunResult,
     RunState,
     RunStatus,
@@ -51,11 +70,9 @@ class ValidationResult:
 
 
 def _default_context_builder(state: RunState, tools: Sequence[Tool]) -> Mapping[str, Any]:
+    """v0.2: messages live on state directly; context exposes iteration + tools schema."""
     return {
-        "goal": state.goal,
         "iteration": state.iteration,
-        "observations": [obs.payload for obs in state.observations],
-        "feedback": list(state.feedback),
         "tools": [
             {"name": t.name, "description": t.description, "input_schema": dict(t.input_schema)}
             for t in tools
@@ -82,6 +99,10 @@ class Harness:
     every tool (default). In production, list explicit permission strings and
     decline broad grants — Tool.required_permissions is checked against this
     set before any tool runs.
+
+    v0.2: ``system_prompt`` (if non-empty) is injected as the first SYSTEM
+    message of the run when not already present. ``metadata`` is free-form
+    storage adapters can read via Harness.metadata.
     """
 
     tools: list[Tool] = field(default_factory=list)
@@ -89,6 +110,8 @@ class Harness:
     guard: GuardFn = _default_guard
     context_builder: ContextBuilderFn = _default_context_builder
     granted_permissions: frozenset = field(default_factory=lambda: frozenset(["*"]))
+    system_prompt: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def tool_by_name(self, name: str) -> Optional[Tool]:
         for t in self.tools:
@@ -122,6 +145,8 @@ class Runtime:
     # Optional callback ``(ModelUsage) -> float`` that adapters can use to
     # compute cost when the adapter didn't fill ``usage.cost_usd`` itself.
     cost_estimator: Optional[Callable[[Any], float]] = None
+    # v0.2: capability policy applied to messages before each adecide().
+    capability_policy: CapabilityPolicy = field(default_factory=FailFastCapabilityPolicy)
 
     # Construction --------------------------------------------------------
 
@@ -134,6 +159,7 @@ class Runtime:
         default_retry: Optional[RetryPolicy] = None,
         max_cost_usd: float = 0.0,
         cost_estimator: Optional[Callable[[Any], float]] = None,
+        capability_policy: Optional[CapabilityPolicy] = None,
     ) -> "Runtime":
         """Dev/test runtime with permissive defaults.
 
@@ -156,6 +182,7 @@ class Runtime:
             max_iterations=max_iterations,
             max_cost_usd=max_cost_usd,
             cost_estimator=cost_estimator,
+            capability_policy=capability_policy or FailFastCapabilityPolicy(),
         )
 
     @classmethod
@@ -170,6 +197,7 @@ class Runtime:
         max_iterations: int = 8,
         max_cost_usd: float = 0.0,
         cost_estimator: Optional[Callable[[Any], float]] = None,
+        capability_policy: Optional[CapabilityPolicy] = None,
     ) -> "Runtime":
         """Production runtime: fail closed on missing durability/observability."""
         if checkpointer is None:
@@ -190,19 +218,44 @@ class Runtime:
             max_iterations=max_iterations,
             max_cost_usd=max_cost_usd,
             cost_estimator=cost_estimator,
+            capability_policy=capability_policy or FailFastCapabilityPolicy(),
         )
 
     # Public API ----------------------------------------------------------
 
-    def run(self, harness: Harness, goal: str) -> RunResult:
+    def run(
+        self,
+        harness: Harness,
+        messages: Union[list[Message], str, None] = None,
+        *,
+        goal: Optional[str] = None,
+    ) -> RunResult:
         """Synchronous entry point. Internally drives the async loop."""
-        return asyncio.run(self.arun(harness, goal))
+        return asyncio.run(self.arun(harness, messages, goal=goal))
 
-    async def arun(self, harness: Harness, goal: str) -> RunResult:
-        state = RunState(goal=goal)
+    async def arun(
+        self,
+        harness: Harness,
+        messages: Union[list[Message], str, None] = None,
+        *,
+        goal: Optional[str] = None,
+    ) -> RunResult:
+        """v0.2: accept ``str`` (auto-wrapped) or ``list[Message]``.
+
+        Legacy ``goal=`` keyword is accepted for backwards compatibility and
+        is treated identically to passing a str positionally.
+        """
+        seed = self._coerce_seed(messages, goal)
+        state = RunState(messages=seed)
         return await self._continue(harness, state)
 
-    async def astream(self, harness: Harness, goal: str):
+    async def astream(
+        self,
+        harness: Harness,
+        messages: Union[list[Message], str, None] = None,
+        *,
+        goal: Optional[str] = None,
+    ):
         """Run an agent and yield events as they happen.
 
         Yields tuples of ``(kind, payload)``:
@@ -219,7 +272,7 @@ class Runtime:
         original_telemetry = self.telemetry
         try:
             self.telemetry = _ChainedSink(original_telemetry, _QueueSink(queue))
-            run_task = _asyncio.create_task(self.arun(harness, goal))
+            run_task = _asyncio.create_task(self.arun(harness, messages, goal=goal))
             while True:
                 getter = _asyncio.create_task(queue.get())
                 done, _ = await _asyncio.wait(
@@ -260,38 +313,72 @@ class Runtime:
         state.interrupt = None
 
         if interrupt is None:
+            # Plain resume with no pending interrupt — treat feedback (if any)
+            # as a fresh user turn.
+            if feedback:
+                state.messages.append(_user_text_message(feedback))
             return await self._continue(harness, state)
 
         if interrupt.reason == InterruptReason.APPROVAL:
             if not approved:
-                state.add_feedback(feedback or "approval rejected")
+                reason = feedback or "approval rejected"
+                state.messages.append(
+                    _user_text_message(f"User rejected the action: {reason}")
+                )
                 state.iteration += 1
                 return await self._continue(harness, state)
             if interrupt.pending_decision is None:
-                state.add_feedback("approval interrupt missing pending decision")
+                state.messages.append(
+                    _user_text_message("approval interrupt missing pending decision")
+                )
                 state.iteration += 1
                 return await self._continue(harness, state)
+            # Approval granted: record the assistant turn (the pending tool
+            # call) and run it, then continue the loop.
+            state.messages.append(Message(
+                role=Role.ASSISTANT,
+                content=interrupt.pending_decision.content,
+            ))
             await self._execute_decision(harness, state, interrupt.pending_decision)
             finished = await self._maybe_finish_after_tools(harness, state)
             if finished is not None:
                 return finished
             return await self._continue(harness, state)
 
-        # QUESTION resume
+        # QUESTION resume — feedback becomes a user turn re-entering the loop.
         if feedback:
-            state.add_feedback(feedback)
+            state.messages.append(_user_text_message(feedback))
         state.iteration += 1
         return await self._continue(harness, state)
 
     # Loop ----------------------------------------------------------------
 
     async def _continue(self, harness: Harness, state: RunState) -> RunResult:
+        # v0.2: inject SYSTEM message at run start if harness has system_prompt.
+        if (
+            harness.system_prompt
+            and not any(m.role == Role.SYSTEM for m in state.messages)
+        ):
+            state.messages.insert(0, Message(
+                role=Role.SYSTEM,
+                content=(TextBlock(text=harness.system_prompt),),
+            ))
+
         while state.iteration < self.max_iterations:
             if self.compactor.should_compact(state):
                 state = self.compactor.compact(state)
                 self._emit(state, TelemetryEvent(kind="compacted", iteration=state.iteration))
 
             context = harness.context_builder(state, harness.tools)
+
+            # Capability check: validate that no message contains block kinds
+            # unsupported by the model. The default policy raises; downgrade
+            # policies may rewrite messages in place.
+            capabilities = getattr(self.model, "capabilities", None)
+            if isinstance(capabilities, ModelCapabilities):
+                state.messages = list(
+                    self.capability_policy.apply(state.messages, capabilities)
+                )
 
             try:
                 decision = await self.model.adecide(context, state, harness.tools)
@@ -365,6 +452,12 @@ class Runtime:
                     )
 
             if decision.kind == DecisionKind.FINAL_ANSWER:
+                # Append assistant turn so transcript is complete.
+                if decision.content:
+                    state.messages.append(Message(
+                        role=Role.ASSISTANT,
+                        content=decision.content,
+                    ))
                 verdict = harness.validator(state)
                 if verdict.needs_human:
                     state.interrupt = Interrupt(
@@ -380,26 +473,26 @@ class Runtime:
                 return RunResult(
                     status=RunStatus.COMPLETED,
                     state=state,
-                    summary=verdict.summary or decision.content,
+                    summary=verdict.summary or decision.text,
                 )
 
             if decision.kind == DecisionKind.ASK_HUMAN:
                 state.interrupt = Interrupt(
                     reason=InterruptReason.QUESTION,
-                    message=decision.content,
+                    message=decision.text,
                     iteration=state.iteration,
                 )
                 return RunResult(
                     status=RunStatus.PAUSED,
                     state=state,
-                    reason=decision.content,
+                    reason=decision.text,
                 )
 
             if decision.kind == DecisionKind.ABORT:
                 return RunResult(
                     status=RunStatus.FAILED,
                     state=state,
-                    reason=decision.content,
+                    reason=decision.text,
                 )
 
             if decision.kind != DecisionKind.CALL_TOOL:
@@ -423,7 +516,9 @@ class Runtime:
                     reason=guard.reason,
                 )
             if not guard.allowed:
-                state.add_feedback(guard.reason)
+                state.messages.append(_user_text_message(
+                    f"Guard rejected tool call: {guard.reason}"
+                ))
                 self._emit(state, TelemetryEvent(
                     kind="guard_denied",
                     iteration=state.iteration,
@@ -432,6 +527,12 @@ class Runtime:
                 state.iteration += 1
                 continue
 
+            # CALL_TOOL: record the assistant turn (the tool_use blocks) before
+            # executing so the transcript is correctly ordered.
+            state.messages.append(Message(
+                role=Role.ASSISTANT,
+                content=decision.content,
+            ))
             await self._execute_decision(harness, state, decision)
             finished = await self._maybe_finish_after_tools(harness, state)
             if finished is not None:
@@ -449,20 +550,20 @@ class Runtime:
         state: RunState,
         decision: Decision,
     ) -> None:
-        """Execute all tool calls in a Decision in parallel and record observations."""
-        if not decision.tool_calls:
+        """Execute all ToolUseBlocks in a Decision in parallel and append
+        a single user-role Message containing one ToolResultBlock per call."""
+        tool_use_blocks = list(decision.tool_calls)  # tuple[ToolUseBlock, ...]
+        if not tool_use_blocks:
             return
         ctx = ToolContext(
             run_id=state.run_id,
             iteration=state.iteration,
-            goal=state.goal,
+            messages=tuple(state.messages),
             metadata=dict(state.metadata),
         )
+        # Convert each ToolUseBlock → internal ToolCall for the executor.
+        ordered_calls: list[ToolCall] = [_block_to_call(b) for b in tool_use_blocks]
         tasks: list[Any] = []
-        # Preserve call->result alignment so we can attach tool_args to each
-        # observation. The model adapter needs tool_args to rebuild the
-        # assistant turn when replaying conversation history.
-        ordered_calls = list(decision.tool_calls)
         for call in ordered_calls:
             tool = harness.tool_by_name(call.name)
             if tool is None:
@@ -486,21 +587,25 @@ class Runtime:
                 )
             )
         results = await asyncio.gather(*tasks)
+
+        # Emit one ToolResultBlock per call in a single user-role Message,
+        # mirroring Anthropic's tool_result convention.
+        result_blocks: list[ToolResultBlock] = []
         for call, result in zip(ordered_calls, results):
-            state.add_observation(Observation(
-                iteration=state.iteration,
-                kind="tool_result",
-                payload={
-                    "tool_name": result.tool_name,
-                    "tool_args": dict(call.args),
-                    "call_id": result.call_id,
-                    "ok": result.ok,
-                    "output": result.output,
-                    "error": result.error,
-                    "duration_ms": result.duration_ms,
-                    "attempts": result.attempts,
-                },
+            payload = result.output if result.ok else result.error
+            if payload is None:
+                payload_text = "" if result.ok else "tool error"
+            else:
+                payload_text = payload if isinstance(payload, str) else str(payload)
+            result_blocks.append(ToolResultBlock(
+                tool_use_id=call.call_id,
+                content=payload_text,
+                is_error=not result.ok,
             ))
+        state.messages.append(Message(
+            role=Role.USER,
+            content=tuple(result_blocks),
+        ))
 
     async def _maybe_finish_after_tools(
         self,
@@ -525,7 +630,8 @@ class Runtime:
                 state=state,
                 reason=verdict.question,
             )
-        state.add_feedback(verdict.feedback)
+        if verdict.feedback:
+            state.messages.append(_user_text_message(verdict.feedback))
         state.iteration += 1
         return None
 
@@ -544,6 +650,41 @@ class Runtime:
         )
         state.trace.append(enriched)
         self.telemetry.emit(enriched)
+
+    # Helpers -------------------------------------------------------------
+
+    @staticmethod
+    def _coerce_seed(
+        messages: Union[list[Message], str, None],
+        goal: Optional[str],
+    ) -> list[Message]:
+        """Normalize arun/run input into a list[Message].
+
+        Accepts (in order of precedence):
+        - explicit ``messages: list[Message]``
+        - ``messages: str`` (wrapped as USER TextBlock)
+        - legacy ``goal: str`` keyword (wrapped as USER TextBlock)
+        """
+        if messages is None and goal is not None:
+            return [_user_text_message(goal)]
+        if isinstance(messages, str):
+            return [_user_text_message(messages)]
+        if isinstance(messages, list):
+            return list(messages)
+        if messages is None:
+            return []
+        raise TypeError(
+            "messages must be str, list[Message], or None; got "
+            f"{type(messages).__name__}"
+        )
+
+
+def _user_text_message(text: str) -> Message:
+    return Message(role=Role.USER, content=(TextBlock(text=text),))
+
+
+def _block_to_call(block: ToolUseBlock) -> ToolCall:
+    return ToolCall(name=block.name, args=dict(block.input), call_id=block.id)
 
 
 class _QueueSink:
