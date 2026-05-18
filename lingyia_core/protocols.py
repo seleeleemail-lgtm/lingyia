@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Optional, Protocol, Sequence, runtime_checkable
 
+from .capability import ModelCapabilities
 from .state import Decision, RunState, TelemetryEvent
 
 
@@ -26,6 +27,9 @@ class Model(Protocol):
     Implementations are async. Provider adapters (Claude, OpenAI, local) wrap
     their native APIs and return a Decision per invocation.
     """
+
+    @property
+    def capabilities(self) -> "ModelCapabilities": ...
 
     async def adecide(
         self,
