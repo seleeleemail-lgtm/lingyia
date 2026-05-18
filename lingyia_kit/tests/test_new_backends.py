@@ -15,11 +15,16 @@ from unittest.mock import AsyncMock, MagicMock
 from lingyia_core import (
     Decision,
     Harness,
+    Message,
+    Role,
     RunState,
     RunStatus,
     Runtime,
+    TextBlock,
     Tool,
     ToolResult,
+    ToolResultBlock,
+    ToolUseBlock,
     ValidationResult,
 )
 from lingyia_core.defaults.telemetry import NoopTelemetry
@@ -30,7 +35,11 @@ from lingyia_core.state import RUN_STATE_SCHEMA_VERSION
 
 
 def _seeded_state(run_id: str = "r1") -> RunState:
-    state = RunState(goal="审一份合同", run_id=run_id, iteration=2)
+    state = RunState(
+        messages=[Message(role=Role.USER, content=(TextBlock(text="审一份合同"),))],
+        run_id=run_id,
+        iteration=2,
+    )
     state.metadata["client_id"] = "acme"
     state.metadata["cost_usd"] = 0.05
     return state
@@ -267,7 +276,9 @@ class SubAgentToolTests(unittest.TestCase):
             async def adecide(self, ctx, state, tools):
                 self.n += 1
                 if self.n == 1:
-                    return Decision.call_tool("inner", {"x": "y"})
+                    return Decision.call_tools([
+                        ToolUseBlock(id="inner-1", name="inner", input={"x": "y"}),
+                    ])
                 return Decision.final_answer("sub-agent finished")
 
         def inner_handler(args, ctx):
@@ -292,7 +303,7 @@ class SubAgentToolTests(unittest.TestCase):
             harness=harness,
         )
         from lingyia_core import ToolContext
-        ctx = ToolContext(run_id="parent", iteration=0, goal="parent goal", metadata={})
+        ctx = ToolContext(run_id="parent", iteration=0, messages=(), metadata={})
 
         result = asyncio.run(tool.handler({"goal": "review this clause"}, ctx))
         self.assertTrue(result.ok)
@@ -312,7 +323,7 @@ class SubAgentToolTests(unittest.TestCase):
             harness=harness,
         )
         from lingyia_core import ToolContext
-        ctx = ToolContext(run_id="parent", iteration=0, goal="g", metadata={})
+        ctx = ToolContext(run_id="parent", iteration=0, messages=(), metadata={})
 
         result = asyncio.run(tool.handler({}, ctx))
         self.assertFalse(result.ok)
@@ -337,7 +348,13 @@ class SubAgentToolTests(unittest.TestCase):
             async def adecide(self, ctx, state, tools):
                 self.n += 1
                 if self.n == 1:
-                    return Decision.call_tool("research", {"goal": "find X"})
+                    return Decision.call_tools([
+                        ToolUseBlock(
+                            id="research-1",
+                            name="research",
+                            input={"goal": "find X"},
+                        ),
+                    ])
                 return Decision.final_answer("done with research")
 
         parent_harness = Harness(
@@ -349,13 +366,17 @@ class SubAgentToolTests(unittest.TestCase):
 
         result = asyncio.run(parent_rt.arun(parent_harness, "delegate research"))
         self.assertEqual(result.status, RunStatus.COMPLETED)
-        # Parent should have one tool observation from the sub-agent
-        tool_obs = [o for o in result.state.observations if o.kind == "tool_result"]
-        self.assertEqual(len(tool_obs), 1)
-        self.assertEqual(tool_obs[0].payload["tool_name"], "research")
-        self.assertTrue(tool_obs[0].payload["ok"])
-        # Sub-agent's run_id is in the parent's tool_result observation
-        self.assertIn("run_id", tool_obs[0].payload["output"])
+        # Parent should have one ToolResultBlock from the sub-agent.
+        tool_results = [
+            b for m in result.state.messages
+            for b in m.content
+            if isinstance(b, ToolResultBlock)
+        ]
+        self.assertEqual(len(tool_results), 1)
+        self.assertFalse(tool_results[0].is_error)
+        # Sub-agent's run_id is surfaced in the ToolResultBlock payload.
+        # The runtime serializes the dict via str(), so check the substring.
+        self.assertIn("run_id", tool_results[0].content)
 
 
 if __name__ == "__main__":

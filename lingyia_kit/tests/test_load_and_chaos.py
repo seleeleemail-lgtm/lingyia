@@ -18,14 +18,37 @@ from lingyia_core import (
     Decision,
     Harness,
     RetryPolicy,
+    Role,
     Runtime,
     RunStatus,
+    TextBlock,
     Tool,
     ToolResult,
+    ToolResultBlock,
+    ToolUseBlock,
     ValidationResult,
 )
 from lingyia_core.defaults.telemetry import NoopTelemetry
 from lingyia_kit.checkpointers import SqliteCheckpointer
+
+
+def _first_user_text(state) -> str:
+    """Extract the first user-role TextBlock content as a string."""
+    for msg in state.messages:
+        if msg.role == Role.USER:
+            for block in msg.content:
+                if isinstance(block, TextBlock):
+                    return block.text
+    return ""
+
+
+def _last_tool_result(state):
+    """Return the most recent ToolResultBlock in state.messages, or None."""
+    for msg in reversed(state.messages):
+        for block in msg.content:
+            if isinstance(block, ToolResultBlock):
+                return block
+    return None
 
 
 # Load -------------------------------------------------------------------
@@ -38,17 +61,26 @@ class LoadTests(unittest.TestCase):
 
         class _Model:
             async def adecide(self, ctx, state, tools):
-                return Decision.call_tool("noop", {"goal": state.goal})
+                return Decision.call_tools([
+                    ToolUseBlock(
+                        id="noop-1",
+                        name="noop",
+                        input={"goal": _first_user_text(state)},
+                    ),
+                ])
 
         def noop(args, ctx):
             return ToolResult(tool_name="noop", ok=True, output=args.get("goal", ""))
 
+        def _validator(s):
+            last = _last_tool_result(s)
+            if last is None:
+                return ValidationResult()
+            return ValidationResult(done=True, summary=last.content)
+
         harness = Harness(
             tools=[Tool.from_sync(name="noop", description="n", handler=noop)],
-            validator=lambda s: ValidationResult(
-                done=bool(s.observations),
-                summary=s.observations[-1].payload.get("output", "") if s.observations else "",
-            ),
+            validator=_validator,
         )
 
         with tempfile.TemporaryDirectory() as d:
@@ -75,7 +107,7 @@ class LoadTests(unittest.TestCase):
             self.assertEqual(len(results), 50)
             statuses = [r.status for r in results]
             self.assertTrue(all(s == RunStatus.COMPLETED for s in statuses))
-            goals = sorted(r.state.goal for r in results)
+            goals = sorted(_first_user_text(r.state) for r in results)
             self.assertEqual(goals, sorted(f"task-{i}" for i in range(50)))
 
 
@@ -99,17 +131,23 @@ class ChaosTests(unittest.TestCase):
             handler=flaky_tool,
             retry=RetryPolicy(max_attempts=4, backoff_initial_s=0.0),
         )
+
+        def _chaos_validator(s):
+            last = _last_tool_result(s)
+            if last is None or last.is_error:
+                return ValidationResult()
+            return ValidationResult(done=True, summary="recovered")
+
         harness = Harness(
             tools=[tool],
-            validator=lambda s: ValidationResult(
-                done=bool(s.observations) and s.observations[-1].payload["ok"],
-                summary="recovered",
-            ),
+            validator=_chaos_validator,
         )
 
         class _Model:
             async def adecide(self, ctx, state, tools):
-                return Decision.call_tool("flaky", {})
+                return Decision.call_tools([
+                    ToolUseBlock(id="flaky-1", name="flaky", input={}),
+                ])
 
         rt = Runtime.dev(model=_Model(), max_iterations=5)
         rt.telemetry = NoopTelemetry()

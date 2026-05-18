@@ -25,10 +25,13 @@ from lingyia_core import (
     Decision,
     GuardResult,
     Harness,
+    Role,
     Runtime,
     RunStatus,
     Tool,
     ToolResult,
+    ToolResultBlock,
+    ToolUseBlock,
     ValidationResult,
 )
 from lingyia_kit.adapters._openai_base import OpenAICompatibleModel
@@ -202,11 +205,18 @@ class FullStackIntegrationTests(unittest.TestCase):
         def email_tool(args, ctx):
             return ToolResult(tool_name="send_email", ok=True, output="sent")
 
+        def _email_was_sent(state) -> bool:
+            for msg in state.messages:
+                for block in msg.content:
+                    if isinstance(block, ToolUseBlock) and block.name == "send_email":
+                        return True
+            return False
+
         harness = Harness(
             tools=[Tool.from_sync(name="send_email", description="send", handler=email_tool)],
             guard=lambda d, s: GuardResult(requires_approval=True, reason="CEO email"),
             validator=lambda s: ValidationResult(
-                done=any(o.payload["tool_name"] == "send_email" for o in s.observations),
+                done=_email_was_sent(s),
                 summary="email sent",
             ),
         )
