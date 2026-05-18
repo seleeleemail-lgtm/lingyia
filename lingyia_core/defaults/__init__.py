@@ -1,5 +1,5 @@
 from .checkpointer import InMemoryCheckpointer
-from .compactor import NoOpCompactor, TruncatingCompactor
+from .compactor import NoOpCompactor
 from .telemetry import NoopTelemetry, StdoutTelemetry
 
 __all__ = [
@@ -7,5 +7,4 @@ __all__ = [
     "NoOpCompactor",
     "NoopTelemetry",
     "StdoutTelemetry",
-    "TruncatingCompactor",
 ]
