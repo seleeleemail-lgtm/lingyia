@@ -78,7 +78,8 @@ loadable directly — see Migration below.
   configured `CapabilityPolicy`.
 - `Runtime.arun` / `Runtime.astream` now accept either a `str` (auto-wrapped
   to a single `USER` message) or a pre-built `list[Message]`. The legacy
-  `goal=` keyword is still accepted as a backwards-compat shim.
+  `goal=` keyword has been removed (was retained briefly as a shim but
+  removed in the codex review pass — it hid a real bug in `bfcl_runner.py`).
 - `lingyia_kit.patterns.react`: simplified — no goal/observations context
   builder. Just `tools + system_prompt + metadata + permissions`.
 
@@ -117,14 +118,69 @@ state = RunState(
 )
 ```
 
-The `Runtime.arun(harness, goal="...")` shim still works for the common
-"start a run from a string goal" case.
+For the common "start a run from a string goal" case, pass the string
+positionally:
+
+```python
+result = await runtime.arun(harness, "Find the bug")
+```
+
+### Fixed (codex review pass)
+Independent codex review of the v0.2-α branch surfaced and fixed:
+
+- **Anthropic adapter** declared `THINKING` in `capabilities.emits` but not
+  in `capabilities.accepts`. Claude's own `ThinkingBlock` round-trip back
+  through the runtime was rejected by the capability policy. Added
+  `BlockKind.THINKING` to `accepts`; pinned the contract with a regression
+  test (`emits ⊆ accepts`).
+- **Runtime capability enforcement** silently skipped any Model that
+  lacked a `capabilities` attribute or returned a non-`ModelCapabilities`
+  value. Replaced the `isinstance` guard with a hard `TypeError` at run
+  start; added a default `capabilities` property to
+  `OpenAICompatibleModel` so the base class no longer slips through.
+- **Spec §16 emits enforcement** was missing. Runtime now validates every
+  block in `decision.content` against `capabilities.emits` after `adecide`
+  and raises `CapabilityViolationError` (new error type, distinct from
+  `CapabilityMismatchError`) on leakage.
+- **Validator feedback** on `FINAL_ANSWER` was silently ignored. The
+  validator API exposes `feedback` for exactly this case; the runtime now
+  injects it as a USER turn and re-enters the loop, mirroring the
+  tool-completion path.
+- **Tool output serialization** (spec §8) used `str(payload)` for dicts
+  (Python repr, not JSON) and stringified `tuple[ContentBlock, ...]` rich
+  output instead of preserving it. Introduced `Runtime._serialize_tool_output`:
+  `None → ""`, `str → passthrough`, `tuple[ContentBlock,...] → passthrough`,
+  everything else → `json.dumps(..., ensure_ascii=False, default=str)`.
+- **Compactor** could stack truncation markers across rounds (markers were
+  re-inserted as `SYSTEM` and preserved), and `_adjust_for_tool_pairing`
+  did not actually preserve `tool_use ↔ tool_result` adjacency. Rewrote
+  `TokenAwareCompactor` with explicit atomic transcript groups (one
+  assistant `tool_use` + its following user `tool_result`(s) kept or
+  dropped together) and a sentinel-tagged marker that is replaced on
+  subsequent compactions. SYSTEM-only over-budget state now terminates
+  idempotently.
+- **Migration** (`v01_to_v02`) corrupted non-tool observations and
+  ignored common v0.1 payload shapes. Now branches on `obs.kind`
+  (`text` → assistant text-only message; `tool` / legacy unkeyed-obs →
+  tool_use + tool_result pair; reads tool fields from both top-level and
+  payload). Duplicate `tool_use_id`s in the source snapshot are
+  disambiguated (`<orig>__dup<N>`) while preserving the use→result
+  mapping.
+- **`Runtime.arun(*, goal=None)` shim removed.** The shim was masking a
+  broken `RunState(goal=...)` call in `lingyia_kit/eval/bfcl_runner.py`;
+  the BFCL runner was migrated to construct v0.2 messages and the shim
+  no longer exists in the public API.
+- **`Harness._default_context_builder`** now returns `{system_prompt,
+  tools_schema, metadata}` per spec §10 (was `{iteration, tools}`).
+- **`sub_agent_tool`** docstring rewritten to remove stale v0.1
+  observation/feedback terminology.
 
 ### Testing
-138/138 tests green across `lingyia_core` and `lingyia_kit` on the v0.2-α
-branch. All adapters (OpenAI / SiliconFlow / MiniMax / Anthropic),
-checkpointers, compactors, resilience, telemetry, tools, and streaming
-suites migrated to the new contract.
+164/164 tests green across `lingyia_core` and `lingyia_kit` after the
+codex review fixes (26 new regression tests added on top of the 138
+that came out of Task 6). All adapters (OpenAI / SiliconFlow / MiniMax
+/ Anthropic), checkpointers, compactors, resilience, telemetry, tools,
+and streaming suites migrated to the new contract.
 
 ## [0.1.0] — 2026-05-15
 
