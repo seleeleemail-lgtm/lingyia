@@ -86,6 +86,10 @@ class AnthropicModel:
                 BlockKind.TOOL_USE,
                 BlockKind.TOOL_RESULT,
                 BlockKind.IMAGE,
+                # THINKING is in accepts because Claude returns ThinkingBlock
+                # in assistant turns; the next request must echo those blocks
+                # back unchanged or the API rejects the call.
+                BlockKind.THINKING,
             }),
             emits=frozenset({
                 BlockKind.TEXT,
