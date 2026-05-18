@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any, Mapping, Optional, Sequence
 
 from lingyia_core import Decision, RunState
+from lingyia_core.capability import ModelCapabilities
 
 from .circuit_breaker import CircuitBreaker, CircuitOpenError
 from .rate_limiter import TokenBucketRateLimiter
@@ -32,6 +33,11 @@ class ProtectedModel:
         self.model = model
         self.circuit_breaker = circuit_breaker
         self.rate_limiter = rate_limiter
+
+    @property
+    def capabilities(self) -> ModelCapabilities:
+        """Forward capabilities from wrapped model unchanged."""
+        return self.model.capabilities
 
     async def adecide(
         self,
