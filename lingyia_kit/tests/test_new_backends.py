@@ -295,9 +295,13 @@ class SubAgentToolTests(unittest.TestCase):
         def inner_handler(args, ctx):
             return ToolResult(tool_name="inner", ok=True, output="ran")
 
+        # v0.2-α (codex verify P2): with no validator the default identity
+        # is preserved by the runtime so the FINAL_ANSWER path trusts the
+        # model. An explicit `lambda s: ValidationResult(done=False)`
+        # would now deliberately reject and loop — exactly the case codex
+        # flagged — so we leave the harness validator unset here.
         harness = Harness(
             tools=[Tool.from_sync(name="inner", description="inner tool", handler=inner_handler)],
-            validator=lambda s: ValidationResult(),
         )
         rt = Runtime.dev(model=_TwoTurnModel(), max_iterations=4)
         rt.telemetry = NoopTelemetry()
@@ -372,7 +376,8 @@ class SubAgentToolTests(unittest.TestCase):
 
         parent_harness = Harness(
             tools=[sub_tool],
-            validator=lambda s: ValidationResult(),
+            # v0.2-α (codex verify P2): no explicit validator → default
+            # (trust the model's FINAL_ANSWER, loop after tool calls).
         )
         parent_rt = Runtime.dev(model=_ParentModel(), max_iterations=4)
         parent_rt.telemetry = NoopTelemetry()

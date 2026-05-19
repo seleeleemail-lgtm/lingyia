@@ -120,9 +120,15 @@ class CostAccumulationTests(unittest.TestCase):
         rt = Runtime.dev(model=OneShotModel(), max_iterations=2)
         rt.telemetry = NoopTelemetry()
         result = asyncio.run(rt.arun(self._harness(), "t"))
-        # final_answer ends loop on iter 0; only one decision was made
-        self.assertAlmostEqual(result.state.metadata["cost_usd"], 0.15, places=6)
-        self.assertEqual(result.state.metadata["tokens"]["prompt"], 1_000_000)
+        # v0.2-α (codex verify P2): validator returning done=False with no
+        # feedback now correctly drives the loop forward instead of silently
+        # completing with the rejected answer. With max_iterations=2 the
+        # OneShotModel is asked twice and the cost accumulates across both
+        # decisions. The test's docstring ("accumulates cost across decisions")
+        # and harness comment ("never done -> max_iter") were aimed at this
+        # behavior all along; the prior 0.15 assertion encoded the bug.
+        self.assertAlmostEqual(result.state.metadata["cost_usd"], 0.30, places=6)
+        self.assertEqual(result.state.metadata["tokens"]["prompt"], 2_000_000)
 
     def test_max_cost_usd_aborts_run(self):
         expensive = Decision.call_tools([
@@ -185,7 +191,11 @@ class CostAccumulationTests(unittest.TestCase):
         )
         rt.telemetry = NoopTelemetry()
         result = asyncio.run(rt.arun(self._harness(), "t"))
-        self.assertAlmostEqual(result.state.metadata["cost_usd"], 0.15, places=6)
+        # Same accumulation behavior as test_runtime_accumulates_cost_across_decisions:
+        # validator(done=False, feedback="") drives the loop; with max_iter=2
+        # the estimator is invoked twice and cost accrues to ~0.30. (codex
+        # verify P2; the prior 0.15 expected the buggy single-iteration path.)
+        self.assertAlmostEqual(result.state.metadata["cost_usd"], 0.30, places=6)
 
 
 if __name__ == "__main__":

@@ -125,7 +125,11 @@ class FullStackIntegrationTests(unittest.TestCase):
                     required_permissions=frozenset({"fs.read"}),
                 )],
                 granted_permissions=frozenset({"fs.read"}),
-                validator=lambda s: ValidationResult(),
+                # v0.2-α (codex verify P2): no explicit validator → runtime
+                # uses the default (no domain opinion). Default validator
+                # at the FINAL_ANSWER gate trusts the model's terminal
+                # signal; at the tool-completion gate it loops so the
+                # model gets to emit FINAL_ANSWER with the answer text.
             )
 
             ck = SqliteCheckpointer(ckpath)
