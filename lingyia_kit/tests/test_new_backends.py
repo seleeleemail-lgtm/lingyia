@@ -295,13 +295,20 @@ class SubAgentToolTests(unittest.TestCase):
         def inner_handler(args, ctx):
             return ToolResult(tool_name="inner", ok=True, output="ran")
 
-        # v0.2-α (codex verify P2): with no validator the default identity
-        # is preserved by the runtime so the FINAL_ANSWER path trusts the
-        # model. An explicit `lambda s: ValidationResult(done=False)`
-        # would now deliberately reject and loop — exactly the case codex
-        # flagged — so we leave the harness validator unset here.
+        # v0.2-α: default validator now returns done=True, which would
+        # complete after the first tool result. This sub-agent test needs
+        # to drive a tool→final_answer sequence, so we reject (loop) when
+        # the last message is a tool_result and accept on the FINAL_ANSWER
+        # assistant turn.
+        def _loop_until_final_answer(state):
+            last = state.messages[-1] if state.messages else None
+            if last is not None and last.role == Role.ASSISTANT:
+                return ValidationResult(done=True)
+            return ValidationResult(done=False)
+
         harness = Harness(
             tools=[Tool.from_sync(name="inner", description="inner tool", handler=inner_handler)],
+            validator=_loop_until_final_answer,
         )
         rt = Runtime.dev(model=_TwoTurnModel(), max_iterations=4)
         rt.telemetry = NoopTelemetry()

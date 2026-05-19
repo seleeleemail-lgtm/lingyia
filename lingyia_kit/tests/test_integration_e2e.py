@@ -117,6 +117,18 @@ class FullStackIntegrationTests(unittest.TestCase):
                     output=f"Hello, contact alice@example.com",
                 )
 
+            def _loop_until_final_answer(state):
+                # v0.2-α: default validator now returns done=True, which
+                # would complete the run as soon as the tool result is
+                # appended. This test needs to drive a tool→final_answer
+                # sequence, so we reject (loop) while the last message is
+                # a USER tool_result and accept once the assistant emits
+                # the FINAL_ANSWER text turn.
+                last = state.messages[-1] if state.messages else None
+                if last is not None and last.role == Role.ASSISTANT:
+                    return ValidationResult(done=True)
+                return ValidationResult(done=False)
+
             harness = Harness(
                 tools=[Tool.from_sync(
                     name="read_doc",
@@ -125,11 +137,7 @@ class FullStackIntegrationTests(unittest.TestCase):
                     required_permissions=frozenset({"fs.read"}),
                 )],
                 granted_permissions=frozenset({"fs.read"}),
-                # v0.2-α (codex verify P2): no explicit validator → runtime
-                # uses the default (no domain opinion). Default validator
-                # at the FINAL_ANSWER gate trusts the model's terminal
-                # signal; at the tool-completion gate it loops so the
-                # model gets to emit FINAL_ANSWER with the answer text.
+                validator=_loop_until_final_answer,
             )
 
             ck = SqliteCheckpointer(ckpath)

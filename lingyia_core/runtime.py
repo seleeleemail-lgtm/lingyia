@@ -104,20 +104,19 @@ def _default_guard(decision: Decision, state: RunState) -> GuardResult:
 
 
 def _default_validator(state: RunState) -> ValidationResult:
-    """Default validator: no domain opinion.
+    """Default validator: trust the model.
 
-    Returns ``ValidationResult()`` (i.e. ``done=False``). The runtime treats
-    a default-validator verdict as "no opinion, trust the model" at the
-    FINAL_ANSWER gate (so an unconfigured ``Harness()`` lets the model's
-    final answer terminate the run) and as "keep looping" at the tool-
-    completion gate (so the model gets a chance to emit FINAL_ANSWER).
+    Returns ``ValidationResult(done=True)``. With no domain validator
+    supplied, the runtime treats every verdict as a completion signal —
+    the model is the authority on when its answer is final, and any tool
+    result is enough to terminate the run.
 
     Domain authors override this to enforce completion criteria. An
     explicit ``ValidationResult(done=False)`` from a custom validator is a
-    deliberate rejection that drives the loop forward at *both* gates
-    (codex verify P2; see runtime FINAL_ANSWER branch).
+    deliberate rejection that drives the loop forward at both the
+    FINAL_ANSWER gate and the tool-completion gate.
     """
-    return ValidationResult()
+    return ValidationResult(done=True)
 
 
 @dataclass
@@ -505,26 +504,16 @@ class Runtime:
                         state=state,
                         reason=verdict.question,
                     )
-                # Validator rejected the final answer. Mirror the tool-
-                # completion path (_maybe_finish_after_tools): if feedback
-                # is non-empty inject it as a USER turn so the model can
-                # revise; either way, advance the iteration counter and
-                # continue the loop. Returning COMPLETED with the rejected
-                # text would silently ship a wrong answer (codex verify P2).
+                # Validator verdict drives the FINAL_ANSWER gate.
+                # - done=True       → COMPLETED with the answer
+                # - feedback set    → inject as USER turn, iter++, continue
+                # - no feedback     → iter++, continue
                 #
-                # Exception: the **default** validator returns done=False
-                # because it has no domain opinion. Treating that as a
-                # rejection would mean an unconfigured ``Harness()`` could
-                # never terminate via FINAL_ANSWER. We special-case the
-                # default by identity so user-supplied
-                # ``lambda s: ValidationResult(done=False)`` is still a
-                # deliberate rejection that loops, while
-                # ``Harness()`` (no validator) trusts the model.
-                #
-                # If max_iterations is hit while a custom validator keeps
-                # rejecting, the outer ``while`` exits with the standard
-                # STOPPED / "max_iterations reached" terminal.
-                if not verdict.done and harness.validator is not _default_validator:
+                # Default validator (no harness override) returns done=True,
+                # so an unconfigured ``Harness()`` trusts the model. A
+                # caller-supplied ``ValidationResult(done=False)`` is a
+                # deliberate rejection that loops until max_iterations.
+                if not verdict.done:
                     if verdict.feedback:
                         state.messages.append(_user_text_message(verdict.feedback))
                     state.iteration += 1
