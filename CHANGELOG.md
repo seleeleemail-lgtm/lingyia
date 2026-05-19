@@ -175,6 +175,11 @@ Independent codex review of the v0.2-α branch surfaced and fixed:
 - **`sub_agent_tool`** docstring rewritten to remove stale v0.1
   observation/feedback terminology.
 
+### Known limitations / deferred (codex review pass 5 observations)
+- **Compactor marker text protocol coupling**: the truncation marker uses a sentinel text prefix (`[lingyia:compactor-marker]`) as both display content and compactor-internal protocol. A future v0.2-β cleanup will move the marker to a dedicated message type (likely via `Message.kind` or a `TruncationBlock`) when streaming support is added. User-facing impact: do not write SYSTEM messages whose text starts with `[lingyia:compactor-marker]`.
+- **TokenEstimator monotonicity contract**: the `TokenEstimator` type alias requires monotonic estimators. Built-in `char_div4_estimator` and `tiktoken_estimator` comply. Custom estimators that violate monotonicity may cause over-budget compacted states (no infinite loop, no crash; budget safety is best-effort).
+- **Sub-agent cost propagation**: parent runtime's `max_cost_usd` budget does NOT include sub-agent costs. Sub-agent cost is reported in the tool result payload and telemetry only. Real cost-propagation API arrives in v0.2-γ.
+
 ### Testing
 164/164 tests green across `lingyia_core` and `lingyia_kit` after the
 codex review fixes (26 new regression tests added on top of the 138
