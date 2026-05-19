@@ -514,3 +514,116 @@ def test_existing_marker_preserved_when_no_new_drops():
     assert _shape(s1) == _shape(s2), (
         f"compact() not idempotent across rounds: s1={_shape(s1)} vs s2={_shape(s2)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Codex round 4 P2 — cumulative marker count + non-monotonic estimator
+# ---------------------------------------------------------------------------
+
+
+def test_marker_count_accumulates_across_compactions():
+    """Codex round 4 P2 (token_aware.py:243): the truncation marker's
+    dropped-count must be CUMULATIVE across compact() rounds.
+
+    Reproducer: compact once (drops N messages → marker count N). Append
+    more chatter, compact again (drops another M messages). The new
+    marker must read N+M, not M. Previously the count was per-round so
+    the audit trail of total lost history was destroyed each round.
+    """
+    def _msg(role, text):
+        return Message(role=role, content=(TextBlock(text=text),))
+
+    c = TokenAwareCompactor(
+        max_tokens=50,
+        keep_last_turns=1,
+        keep_recent_messages=2,
+        token_estimator=char_div4_estimator,
+    )
+    state = RunState(
+        messages=[_msg(Role.USER, "x" * 20) for _ in range(12)],
+        run_id="x",
+    )
+    s1 = c.compact(state)
+
+    s1_markers = [
+        m.content[0].text for m in s1.messages
+        if TokenAwareCompactor.is_truncation_marker(m)
+    ]
+    assert len(s1_markers) == 1
+    # Recover the count from the marker text.
+    import re as _re
+    s1_count_match = _re.search(r"earlier (\d+) messages", s1_markers[0])
+    assert s1_count_match
+    s1_count = int(s1_count_match.group(1))
+    assert s1_count > 0, "first round must have dropped at least one msg"
+
+    # Append more chatter and compact again.
+    s1.messages.extend([_msg(Role.USER, "y" * 20) for _ in range(6)])
+    s2 = c.compact(s1)
+    s2_markers = [
+        m.content[0].text for m in s2.messages
+        if TokenAwareCompactor.is_truncation_marker(m)
+    ]
+    assert len(s2_markers) == 1
+    s2_count_match = _re.search(r"earlier (\d+) messages", s2_markers[0])
+    assert s2_count_match
+    s2_count = int(s2_count_match.group(1))
+
+    # Cumulative invariant: s2's count strictly exceeds s1's count
+    # (this round dropped additional messages).
+    assert s2_count > s1_count, (
+        f"marker count did not accumulate: round1={s1_count}, round2={s2_count}"
+    )
+
+
+def test_compaction_converges_under_non_monotonic_estimator():
+    """Codex round 4 P2 (token_aware.py:241): partition must converge in
+    a single pass even under a pathological non-monotonic estimator. The
+    earlier 2-pass scheme assumed the marker text's estimated token cost
+    was monotonic in the dropped-count — true for char_div4 and tiktoken
+    but not a contract of TokenEstimator.
+
+    Reproducer (codex): an estimator that maps marker text for count=6
+    to 10 tokens while marker text for counts 5 and 10 cost 1 and 0
+    respectively. Pre-fix, the 2-pass partition oscillated and left the
+    state above budget.
+
+    Post-fix: we reserve against the maximum marker cost over all
+    possible cumulative counts in this call, so the partition always
+    produces a result that fits.
+    """
+    import re as _re
+    from lingyia_kit.compactors.token_aware import _estimate_message_tokens
+
+    def est(text: str) -> int:
+        if text.startswith("[lingyia:compactor-marker]"):
+            m = _re.search(r"earlier (\d+) messages", text)
+            if m:
+                n = int(m.group(1))
+                return {10: 0, 5: 1, 6: 10}.get(n, 0)
+            return 0
+        return 1
+
+    def msg():
+        return Message(role=Role.USER, content=(TextBlock(text="x"),))
+
+    c = TokenAwareCompactor(
+        max_tokens=5,
+        keep_last_turns=0,
+        keep_recent_messages=0,
+        token_estimator=est,
+    )
+    state = RunState(messages=[msg() for _ in range(10)], run_id="x")
+    assert c.should_compact(state)
+    s = c.compact(state)
+
+    total = sum(_estimate_message_tokens(m, est) for m in s.messages)
+    # Compaction must bring state at or below budget under any estimator
+    # (irreducible-floor case excluded — here floor=0 so it doesn't apply).
+    assert total <= c.max_tokens, (
+        f"non-monotonic estimator broke partition convergence: "
+        f"total={total} > max={c.max_tokens}"
+    )
+    assert not c.should_compact(s), (
+        "compact() result still over budget under non-monotonic estimator"
+    )

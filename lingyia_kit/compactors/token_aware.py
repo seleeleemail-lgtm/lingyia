@@ -28,6 +28,7 @@ Codex P2 fixes:
 """
 from __future__ import annotations
 
+import re
 from copy import copy
 from typing import Callable, Optional
 
@@ -43,6 +44,13 @@ TokenEstimator = Callable[[str], int]
 # notice (vs an original system prompt). Old markers are recognized and
 # replaced — never stacked.
 _TRUNCATION_MARKER_PREFIX = "[lingyia:compactor-marker]"
+
+# Regex used to recover the prior marker's cumulative count so a fresh
+# marker can accumulate (codex round 4 P2: token_aware.py:243). Must match
+# the literal text emitted by ``_make_truncation_marker``. If parsing
+# fails (corrupted / hand-edited marker), callers default to 0 — do NOT
+# crash on a bad marker.
+_MARKER_COUNT_RE = re.compile(r"earlier (\d+) messages truncated")
 
 
 def char_div4_estimator(text: str) -> int:
@@ -161,16 +169,33 @@ class TokenAwareCompactor:
         Codex round 3 P2 fixes:
         - :196 The truncation marker's own token cost is now included in the
           partition budget. Without this, the marker (~25 tokens at char/4)
-          would push state over budget on its first compact() call. We
-          reserve marker tokens conservatively up-front, partition, and if
-          the actual dropped-count yields a larger marker estimate we
-          re-partition once with the corrected reservation.
+          would push state over budget on its first compact() call.
         - :170 An existing truncation marker in the input is **preserved**
           across rounds when this call drops zero new groups. The marker is
           the audit record that history was already truncated; it must
           survive subsequent compactions until/unless replaced by a fresher
           one. (When new groups ARE dropped this round, the fresh marker
           subsumes the old; we still emit only one marker.)
+
+        Codex round 4 P2 fixes:
+        - :243 The fresh marker's count is now CUMULATIVE: prior_count +
+          newly_dropped_count. The prior marker's count is recovered by
+          regex from its text. Previously the new marker overwrote the old
+          count, silently losing the audit trail across rounds. Corrupted
+          markers parse to 0 (no crash) so the accumulator resets cleanly
+          rather than taking the run down.
+        - :241 Marker-budget reservation is now done ONCE up-front against
+          the MAXIMUM marker token-cost over the entire possible
+          cumulative-count range ``[prior_count, prior_count +
+          len(messages)]``. This guarantees convergence in a single
+          partition pass regardless of estimator behavior — including
+          pathological non-monotonic estimators where the marker for
+          count=k could cost more than the marker for any k' > k. The
+          earlier 2-pass scheme assumed monotonicity (true for the
+          builtin ``char_div4_estimator`` and ``tiktoken_estimator``) but
+          could oscillate under arbitrary estimators. Trade-off: a few
+          tokens of headroom wasted in normal cases — acceptable since
+          the marker grows ~logarithmically with the count.
         """
         messages = list(state.messages)
 
@@ -215,41 +240,44 @@ class TokenAwareCompactor:
             for m in original_system
         )
 
-        # Codex round 3 P2 (token_aware.py:196): account for the marker's
-        # own token cost in the partition. We don't yet know the
-        # dropped-count, so reserve based on a placeholder, then re-check
-        # once we know the actual count. One re-partition is sufficient
-        # because the marker text grows logarithmically with the count,
-        # so the second estimate either matches or differs by a tiny
-        # amount that the soft floor absorbs.
-        def _marker_reservation(dropped_count: int) -> int:
-            return _estimate_message_tokens(
-                self._make_truncation_marker(dropped_count),
+        # Codex round 3 P2 (token_aware.py:196) + round 4 P2 (:241):
+        # account for the marker's own token cost in the partition budget,
+        # and reserve CONSERVATIVELY against ALL possible marker sizes for
+        # any cumulative count this call could produce. The cumulative
+        # count is ``prior_count + dropped_message_count`` where
+        # ``dropped_message_count`` ranges over ``[0, total_flat_messages]``.
+        # We reserve the maximum marker-token-cost across that whole range
+        # in one shot, so the partition converges in a single pass
+        # regardless of estimator monotonicity. For the builtin
+        # ``char_div4_estimator`` and ``tiktoken_estimator`` (both
+        # monotonic-ish in input length), this equals the cost at the
+        # largest count and matches the prior 2-pass result; for
+        # pathological estimators (codex repro: ``{10:0, 5:1, 6:10}`` over
+        # the marker text) we still pick the largest cost so the kept
+        # tail genuinely fits after the marker is inserted.
+        #
+        # Trade-off: a few tokens of headroom wasted in normal cases.
+        # Acceptable — the marker grows logarithmically with the count
+        # under realistic tokenizers, so the headroom is small.
+        prior_count = self._parse_marker_count(prior_marker)
+        total_flat_messages = sum(len(g) for g in groups)
+        marker_reserve = 0
+        # Range is small in practice (bounded by len(messages)); enumerate
+        # honestly rather than assume any property of the estimator.
+        for candidate_count in range(0, total_flat_messages + 1):
+            cost = _estimate_message_tokens(
+                self._make_truncation_marker(prior_count + candidate_count),
                 self.token_estimator,
             )
+            if cost > marker_reserve:
+                marker_reserve = cost
 
-        # First pass: reserve marker tokens assuming a moderate drop count.
-        # Any positive count yields a marker text close in length to the
-        # final one (the count's decimal width grows slowly).
-        marker_reserve = _marker_reservation(max(1, len(groups)))
         kept_groups, dropped_groups = self._partition_groups(
             groups,
             system_tokens=system_tokens,
             marker_tokens=marker_reserve if marker_reserve else 0,
         )
-
-        # Second pass: if the actual dropped-count yields a different
-        # marker estimate, re-partition once with the true reservation.
         dropped_message_count = sum(len(g) for g in dropped_groups)
-        if dropped_message_count > 0:
-            actual_marker_tokens = _marker_reservation(dropped_message_count)
-            if actual_marker_tokens != marker_reserve:
-                kept_groups, dropped_groups = self._partition_groups(
-                    groups,
-                    system_tokens=system_tokens,
-                    marker_tokens=actual_marker_tokens,
-                )
-                dropped_message_count = sum(len(g) for g in dropped_groups)
 
         # 5. Rebuild flat message list with the marker if anything dropped
         #    OR if a prior marker existed and must be carried forward.
@@ -259,9 +287,14 @@ class TokenAwareCompactor:
 
         new_messages: list[Message] = list(original_system)
         if dropped_message_count > 0:
-            # Fresh marker subsumes any prior marker for this round.
+            # Cumulative count = prior marker's recorded count + this
+            # round's new drops (codex round 4 P2: token_aware.py:243).
+            # If the prior marker text was corrupted/edited and parsing
+            # failed, prior_count defaults to 0 — we don't crash, we just
+            # restart the counter from this round's drops.
+            cumulative_count = prior_count + dropped_message_count
             new_messages.append(
-                self._make_truncation_marker(dropped_message_count)
+                self._make_truncation_marker(cumulative_count)
             )
         elif prior_marker is not None:
             # No new drops this round — preserve the prior marker verbatim
@@ -299,6 +332,27 @@ class TokenAwareCompactor:
             f"[earlier {dropped_count} messages truncated to save context]"
         )
         return Message(role=Role.SYSTEM, content=(TextBlock(text=text),))
+
+    @staticmethod
+    def _parse_marker_count(marker: Optional[Message]) -> int:
+        """Recover the prior marker's cumulative dropped-count.
+
+        Returns 0 if ``marker`` is None or its text doesn't match the
+        expected ``earlier N messages truncated`` format. We deliberately
+        don't raise on a corrupted/hand-edited marker — losing the
+        accumulator is preferable to crashing the compactor mid-run.
+        """
+        if marker is None:
+            return 0
+        for b in marker.content:
+            if isinstance(b, TextBlock):
+                m = _MARKER_COUNT_RE.search(b.text)
+                if m:
+                    try:
+                        return int(m.group(1))
+                    except ValueError:
+                        return 0
+        return 0
 
     # ----- group construction ------------------------------------------
 
