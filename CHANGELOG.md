@@ -174,6 +174,7 @@ Independent codex review of the v0.2-α branch surfaced and fixed:
   tools_schema, metadata}` per spec §10 (was `{iteration, tools}`).
 - **`sub_agent_tool`** docstring rewritten to remove stale v0.1
   observation/feedback terminology.
+- **Runtime validator gate moved to FINAL_ANSWER only**: `harness.validator` is no longer invoked after tool execution. Previously the after-tool gate caused premature termination when validators returned `done=True`. Tool-result-based early termination is now the model's responsibility (emit `Decision.FINAL_ANSWER` when work is complete). This aligns with LangGraph / OpenAI Agents SDK / Pydantic AI conventions.
 
 ### Known limitations / deferred (codex review pass 5 observations)
 - **Compactor marker text protocol coupling**: the truncation marker uses a sentinel text prefix (`[lingyia:compactor-marker]`) as both display content and compactor-internal protocol. A future v0.2-β cleanup will move the marker to a dedicated message type (likely via `Message.kind` or a `TruncationBlock`) when streaming support is added. User-facing impact: do not write SYSTEM messages whose text starts with `[lingyia:compactor-marker]`.
@@ -181,11 +182,10 @@ Independent codex review of the v0.2-α branch surfaced and fixed:
 - **Sub-agent cost propagation**: parent runtime's `max_cost_usd` budget does NOT include sub-agent costs. Sub-agent cost is reported in the tool result payload and telemetry only. Real cost-propagation API arrives in v0.2-γ.
 
 ### Testing
-164/164 tests green across `lingyia_core` and `lingyia_kit` after the
-codex review fixes (26 new regression tests added on top of the 138
-that came out of Task 6). All adapters (OpenAI / SiliconFlow / MiniMax
-/ Anthropic), checkpointers, compactors, resilience, telemetry, tools,
-and streaming suites migrated to the new contract.
+174/174 tests green across `lingyia_core` and `lingyia_kit` after the
+codex review fixes. All adapters (OpenAI / SiliconFlow / MiniMax /
+Anthropic), checkpointers, compactors, resilience, telemetry, tools, and
+streaming suites migrated to the new contract.
 
 ## [0.1.0] — 2026-05-15
 
