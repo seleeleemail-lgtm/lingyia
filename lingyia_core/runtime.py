@@ -107,14 +107,19 @@ def _default_validator(state: RunState) -> ValidationResult:
     """Default validator: trust the model.
 
     Returns ``ValidationResult(done=True)``. With no domain validator
-    supplied, the runtime treats every verdict as a completion signal —
-    the model is the authority on when its answer is final, and any tool
-    result is enough to terminate the run.
+    supplied, the runtime accepts the model's ``FINAL_ANSWER`` as the end
+    of the run — the model is the authority on when its answer is final.
+
+    v0.2-α: the validator runs ONLY at the ``FINAL_ANSWER`` gate. Tool
+    results no longer trigger validation; the model decides whether to
+    finalize, call more tools, or otherwise progress on each iteration.
+    This mirrors LangGraph / OpenAI Agents SDK / Pydantic AI conventions
+    where the validator/guardrail is a single gate over the final response.
 
     Domain authors override this to enforce completion criteria. An
     explicit ``ValidationResult(done=False)`` from a custom validator is a
-    deliberate rejection that drives the loop forward at both the
-    FINAL_ANSWER gate and the tool-completion gate.
+    deliberate rejection at the FINAL_ANSWER gate that drives the loop
+    forward (with optional ``feedback`` re-entered as a USER TextBlock).
     """
     return ValidationResult(done=True)
 
@@ -365,9 +370,7 @@ class Runtime:
                 content=interrupt.pending_decision.content,
             ))
             await self._execute_decision(harness, state, interrupt.pending_decision)
-            finished = await self._maybe_finish_after_tools(harness, state)
-            if finished is not None:
-                return finished
+            await self._advance_iteration_after_tools(harness, state)
             return await self._continue(harness, state)
 
         # QUESTION resume — feedback becomes a user turn re-entering the loop.
@@ -582,9 +585,7 @@ class Runtime:
                 content=decision.content,
             ))
             await self._execute_decision(harness, state, decision)
-            finished = await self._maybe_finish_after_tools(harness, state)
-            if finished is not None:
-                return finished
+            await self._advance_iteration_after_tools(harness, state)
 
         return RunResult(
             status=RunStatus.STOPPED,
@@ -702,33 +703,29 @@ class Runtime:
             # rather than crash the whole run.
             return str(payload)
 
-    async def _maybe_finish_after_tools(
+    async def _advance_iteration_after_tools(
         self,
         harness: Harness,
         state: RunState,
-    ) -> Optional[RunResult]:
-        verdict = harness.validator(state)
-        if verdict.done:
-            return RunResult(
-                status=RunStatus.COMPLETED,
-                state=state,
-                summary=verdict.summary,
-            )
-        if verdict.needs_human:
-            state.interrupt = Interrupt(
-                reason=InterruptReason.QUESTION,
-                message=verdict.question,
-                iteration=state.iteration,
-            )
-            return RunResult(
-                status=RunStatus.PAUSED,
-                state=state,
-                reason=verdict.question,
-            )
-        if verdict.feedback:
-            state.messages.append(_user_text_message(verdict.feedback))
+    ) -> None:
+        """Advance to the next iteration after tool execution completes.
+
+        v0.2-α design: ``harness.validator`` is invoked ONLY at the
+        ``FINAL_ANSWER`` gate. Tool results trigger another model iteration
+        (where the model decides whether to emit ``FINAL_ANSWER``, call more
+        tools, or otherwise progress). Early termination based on tool
+        outcomes is the model's responsibility — it must emit
+        ``Decision.FINAL_ANSWER`` itself when its job is done. This matches
+        LangGraph / OpenAI Agents SDK / Pydantic AI conventions where the
+        validator/guardrail is a single gate over the final response, not a
+        per-tool checkpoint.
+
+        ``harness`` is currently unused but kept for API symmetry and to
+        leave room for future per-iteration hooks without re-threading the
+        call sites.
+        """
+        del harness  # reserved for future use; see docstring
         state.iteration += 1
-        return None
 
     def _require_capabilities(self) -> ModelCapabilities:
         """Return ``self.model.capabilities`` or raise.

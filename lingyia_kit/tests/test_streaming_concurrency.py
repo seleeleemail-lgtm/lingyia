@@ -34,13 +34,22 @@ from lingyia_core.executor import ToolExecutor
 
 class StreamingTests(unittest.TestCase):
     def test_astream_yields_events_then_final(self):
-        class OneTurnModel:
+        # v0.2-α: validator gates only at FINAL_ANSWER. The model emits a
+        # tool call on turn 1 and FINAL_ANSWER on turn 2; the validator's
+        # done=True is honored at the FINAL_ANSWER gate.
+        class TwoTurnModel:
             capabilities = _FAKE_CAPS
 
+            def __init__(self):
+                self.n = 0
+
             async def adecide(self, ctx, state, tools):
-                return Decision.call_tools([
-                    ToolUseBlock(id="call-1", name="noop", input={}),
-                ])
+                self.n += 1
+                if self.n == 1:
+                    return Decision.call_tools([
+                        ToolUseBlock(id="call-1", name="noop", input={}),
+                    ])
+                return Decision.final_answer("ok")
 
         def noop(args, ctx):
             return ToolResult(tool_name="noop", ok=True, output="x")
@@ -49,7 +58,7 @@ class StreamingTests(unittest.TestCase):
             tools=[Tool.from_sync(name="noop", description="n", handler=noop)],
             validator=lambda s: ValidationResult(done=True, summary="ok"),
         )
-        rt = Runtime.dev(model=OneTurnModel(), max_iterations=3)
+        rt = Runtime.dev(model=TwoTurnModel(), max_iterations=3)
         rt.telemetry = NoopTelemetry()
 
         async def collect():

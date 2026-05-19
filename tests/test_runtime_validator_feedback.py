@@ -1,10 +1,9 @@
 """Regression tests for validator feedback lifecycle (codex P2 runtime.py:461).
 
-The validator runs after both tool-execution turns and final-answer turns.
-Per the validator lifecycle contract, a non-empty ``ValidationResult.feedback``
-on a not-done verdict MUST be re-entered into the conversation as a USER
-TextBlock and the loop must continue — same as the tool path
-(_maybe_finish_after_tools).
+v0.2-α: the validator runs ONLY at the FINAL_ANSWER gate (not after tool
+execution). Per the validator lifecycle contract, a non-empty
+``ValidationResult.feedback`` on a not-done verdict MUST be re-entered into
+the conversation as a USER TextBlock and the loop must continue.
 
 Before the fix, FINAL_ANSWER ignored feedback unless ``needs_human`` was
 true, silently swallowing the validator's rejection.

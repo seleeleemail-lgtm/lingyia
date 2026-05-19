@@ -164,7 +164,13 @@ def _feedback_texts(state: RunState) -> list[str]:
 
 
 async def test_tool_result_satisfies_validator():
-    """Tool-call → ToolResult → ToolResultBlock appended as user-role message."""
+    """Tool-call → ToolResult → ToolResultBlock appended as user-role message.
+
+    v0.2-α: the validator is gated on FINAL_ANSWER only — after tool
+    execution the loop continues and asks the model again. The model here
+    emits a FINAL_ANSWER on its second turn, where the validator's
+    ``done=True`` is honored.
+    """
     seen: list = []
 
     def echo(args, ctx: ToolContext) -> ToolResult:
@@ -175,7 +181,10 @@ async def test_tool_result_satisfies_validator():
         tools=[_sync_tool("echo", echo)],
         validator=lambda state: ValidationResult(done=True, summary="done"),
     )
-    result = await _runtime(ScriptedModel(_call_tool("echo", {"text": "hello"}))).arun(
+    result = await _runtime(ScriptedModel(
+        _call_tool("echo", {"text": "hello"}),
+        Decision.final_answer("echoed"),
+    )).arun(
         harness, "echo hello"
     )
 
@@ -240,7 +249,13 @@ async def test_approval_pause_and_resume():
         ),
         validator=validator,
     )
-    runtime = _runtime(ScriptedModel(_call_tool("risky", {"id": 1})))
+    # v0.2-α: validator fires only at FINAL_ANSWER. After the approval is
+    # granted and the tool runs, the model emits FINAL_ANSWER so the
+    # validator gate can complete the run.
+    runtime = _runtime(ScriptedModel(
+        _call_tool("risky", {"id": 1}),
+        Decision.final_answer("applied risky action"),
+    ))
 
     paused = await runtime.arun(harness, "do risky thing")
     assert paused.status == RunStatus.APPROVAL_REQUIRED
@@ -290,7 +305,14 @@ async def test_approval_rejection_feeds_back():
 
 
 async def test_tool_error_becomes_feedback():
-    """Failing tool yields ToolResultBlock(is_error=True); validator feedback re-enters loop."""
+    """Failing tool yields ToolResultBlock(is_error=True); model sees error and retries.
+
+    v0.2-α: validator fires only at FINAL_ANSWER. When a tool fails, the
+    error surfaces as a ToolResultBlock(is_error=True) in the transcript and
+    the model — seeing the failure in its context — decides whether to
+    retry, abort, or finalize. Here the scripted model retries on attempt 2
+    and then emits a FINAL_ANSWER that satisfies the FINAL_ANSWER validator.
+    """
     attempts: list = []
 
     def unstable(args, ctx):
@@ -300,13 +322,13 @@ async def test_tool_error_becomes_feedback():
         return ToolResult(tool_name="unstable", ok=True, output="recovered")
 
     def validate(state: RunState) -> ValidationResult:
+        # FINAL_ANSWER gate: accept once a successful tool result is in the
+        # transcript. Returning done=False here would loop until
+        # max_iterations.
         blocks = _tool_result_blocks(state)
-        if not blocks:
-            return ValidationResult(feedback="no tool result yet")
-        last = blocks[-1]
-        if not last.is_error:
+        if blocks and not blocks[-1].is_error:
             return ValidationResult(done=True, summary="recovered")
-        return ValidationResult(feedback="retry after tool failure")
+        return ValidationResult(done=False)
 
     harness = Harness(
         tools=[_sync_tool("unstable", unstable)],
@@ -315,6 +337,7 @@ async def test_tool_error_becomes_feedback():
     result = await _runtime(ScriptedModel(
         _call_tool("unstable", {"attempt": 1}, call_id="t1"),
         _call_tool("unstable", {"attempt": 2}, call_id="t2"),
+        Decision.final_answer("recovered"),
     )).arun(harness, "recover from tool failure")
 
     assert result.status == RunStatus.COMPLETED
@@ -322,7 +345,7 @@ async def test_tool_error_becomes_feedback():
 
     blocks = _tool_result_blocks(result.state)
     assert len(blocks) == 2
-    # First attempt is the error.
+    # First attempt is the error — surfaces as ToolResultBlock(is_error=True).
     assert blocks[0].is_error is True
     err_content = (
         blocks[0].content
@@ -330,8 +353,8 @@ async def test_tool_error_becomes_feedback():
         else json.dumps([b.__dict__ for b in blocks[0].content], default=str)
     )
     assert "temporary failure" in err_content
-    # Validator feedback was appended between iterations.
-    assert any("retry after tool failure" in t for t in _feedback_texts(result.state))
+    # Second attempt recovered.
+    assert blocks[1].is_error is False
 
 
 # ---------------------------------------------------------------------------
@@ -442,7 +465,9 @@ async def test_parallel_tool_calls_run_concurrently():
         ToolUseBlock(id="tb", name="slow", input={"id": "b"}),
         ToolUseBlock(id="tc", name="slow", input={"id": "c"}),
     ])
-    runtime = _runtime(ScriptedModel(batch))
+    # v0.2-α: model emits FINAL_ANSWER after the parallel batch so the
+    # validator gate at FINAL_ANSWER can finalize the run.
+    runtime = _runtime(ScriptedModel(batch, Decision.final_answer("all done")))
     result = await runtime.arun(harness, "parallel test")
 
     assert result.status == RunStatus.COMPLETED
@@ -580,7 +605,12 @@ async def test_tool_timeout_is_enforced():
             summary="timed out as expected",
         ),
     )
-    runtime = _runtime(ScriptedModel(_call_tool("slow")))
+    # v0.2-α: model emits FINAL_ANSWER after the timeout result so the
+    # FINAL_ANSWER validator gate can complete the run.
+    runtime = _runtime(ScriptedModel(
+        _call_tool("slow"),
+        Decision.final_answer("timed out as expected"),
+    ))
     result = await runtime.arun(harness, "timeout test")
     assert result.status == RunStatus.COMPLETED
 
@@ -616,7 +646,12 @@ async def test_retry_policy_retries_then_succeeds():
             summary="recovered via retry",
         ),
     )
-    runtime = _runtime(ScriptedModel(_call_tool("flaky")))
+    # v0.2-α: model emits FINAL_ANSWER after the retried tool succeeds so
+    # the FINAL_ANSWER validator gate can complete the run.
+    runtime = _runtime(ScriptedModel(
+        _call_tool("flaky"),
+        Decision.final_answer("recovered via retry"),
+    ))
     result = await runtime.arun(harness, "retry test")
     assert result.status == RunStatus.COMPLETED
     assert result.summary == "recovered via retry"

@@ -68,17 +68,26 @@ class LoadTests(unittest.TestCase):
         """50 agents share one Runtime + one SqliteCheckpointer. No
         race conditions, no state corruption, all complete."""
 
+        # v0.2-α: validator gates only at FINAL_ANSWER. Each agent emits a
+        # tool call on turn 1 and FINAL_ANSWER on turn 2; the FINAL_ANSWER
+        # validator gate finalizes the run with the tool output as summary.
         class _Model:
             capabilities = _FAKE_CAPS
 
             async def adecide(self, ctx, state, tools):
-                return Decision.call_tools([
-                    ToolUseBlock(
-                        id="noop-1",
-                        name="noop",
-                        input={"goal": _first_user_text(state)},
-                    ),
-                ])
+                last = _last_tool_result(state)
+                if last is None:
+                    return Decision.call_tools([
+                        ToolUseBlock(
+                            id="noop-1",
+                            name="noop",
+                            input={"goal": _first_user_text(state)},
+                        ),
+                    ])
+                # Echo the tool output as the final answer.
+                return Decision.final_answer(
+                    last.content if isinstance(last.content, str) else ""
+                )
 
         def noop(args, ctx):
             return ToolResult(tool_name="noop", ok=True, output=args.get("goal", ""))
