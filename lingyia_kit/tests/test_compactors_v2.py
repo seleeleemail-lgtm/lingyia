@@ -419,3 +419,98 @@ def test_dropped_groups_inserts_single_marker_not_multiple():
     assert marker_count == 1, (
         f"truncation markers accumulated across rounds: {marker_count}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Codex round 3 P2 — marker cost + idempotence preservation
+# ---------------------------------------------------------------------------
+
+
+def test_compaction_actually_lands_under_budget():
+    """Codex round 3 P2 (token_aware.py:196): the budget partition must
+    account for the truncation marker's own token cost.
+
+    Reproducer: 120 small messages, max_tokens=100, default char/4
+    estimator. Pre-fix, compact() returned a state at 118 tokens — over
+    budget — because the marker (~25 tokens) was inserted AFTER partition.
+
+    Post-fix, the kept tail + system must leave room for the marker, so
+    the final state fits under max_tokens (allowing a small overhead
+    for marker token-estimate jitter — the marker text itself is ~25
+    char/4 tokens).
+    """
+    msgs = []
+    for _ in range(60):
+        msgs.append(_u("x" * 20))
+        msgs.append(_a("y" * 20))
+    c = TokenAwareCompactor(
+        max_tokens=100,
+        keep_last_turns=1,
+        keep_recent_messages=2,
+        token_estimator=char_div4_estimator,
+    )
+    state = RunState(messages=msgs, run_id="x")
+    s1 = c.compact(state)
+
+    from lingyia_kit.compactors.token_aware import _estimate_message_tokens
+    total = sum(_estimate_message_tokens(m, char_div4_estimator) for m in s1.messages)
+
+    # Post-fix invariant: compaction lands under budget on its first call.
+    # should_compact() reports False on the result of compact().
+    assert total <= c.max_tokens, (
+        f"compact() left state above budget: total={total}, "
+        f"max_tokens={c.max_tokens}; marker cost was not accounted for"
+    )
+    assert not c.should_compact(s1), (
+        f"compact() result still flags should_compact=True (total={total})"
+    )
+
+
+def test_existing_marker_preserved_when_no_new_drops():
+    """Codex round 3 P2 (token_aware.py:170): if the input state already
+    carries a truncation marker (recording that history was previously
+    truncated), a subsequent compact() that drops zero new groups must
+    PRESERVE the existing marker. Otherwise the audit trail of past
+    truncation is silently lost on every compact() roundtrip.
+
+    Reproducer: an over-budget SYSTEM plus modest tail; compact() makes
+    the state "kept floor" sized; a second compact() on that result must
+    return an identical message sequence (idempotent), including the
+    marker.
+    """
+    big = Message(role=Role.SYSTEM, content=(TextBlock(text="x" * 4000),))
+    msgs = [big]
+    for i in range(10):
+        msgs.append(_u(str(i)))
+        msgs.append(_a(str(i)))
+    c = TokenAwareCompactor(
+        max_tokens=10,
+        keep_last_turns=1,
+        keep_recent_messages=2,
+        token_estimator=char_div4_estimator,
+    )
+    state = RunState(messages=msgs, run_id="x")
+
+    s1 = c.compact(state)
+    s2 = c.compact(s1)
+
+    # Marker present in s1 (history WAS dropped on the first compact).
+    s1_markers = [m for m in s1.messages if TokenAwareCompactor.is_truncation_marker(m)]
+    assert len(s1_markers) == 1, "first compact should have dropped history and emitted a marker"
+
+    # And it must survive into s2 even though s2's compact dropped 0 new groups.
+    s2_markers = [m for m in s2.messages if TokenAwareCompactor.is_truncation_marker(m)]
+    assert len(s2_markers) == 1, (
+        "existing marker was dropped on second compact when no new groups dropped; "
+        "audit trail of prior truncation is lost"
+    )
+
+    # Stronger invariant: s1 and s2 are message-equal (true idempotence).
+    def _shape(st):
+        return [
+            (m.role, tuple(getattr(b, "text", str(type(b).__name__)) for b in m.content))
+            for m in st.messages
+        ]
+    assert _shape(s1) == _shape(s2), (
+        f"compact() not idempotent across rounds: s1={_shape(s1)} vs s2={_shape(s2)}"
+    )

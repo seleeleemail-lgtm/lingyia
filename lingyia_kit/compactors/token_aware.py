@@ -157,57 +157,116 @@ class TokenAwareCompactor:
         soft floor is reached. The earlier count-based partition could leave
         state above budget after a single compact() call, making
         should_compact() stay True forever in pathological setups.
+
+        Codex round 3 P2 fixes:
+        - :196 The truncation marker's own token cost is now included in the
+          partition budget. Without this, the marker (~25 tokens at char/4)
+          would push state over budget on its first compact() call. We
+          reserve marker tokens conservatively up-front, partition, and if
+          the actual dropped-count yields a larger marker estimate we
+          re-partition once with the corrected reservation.
+        - :170 An existing truncation marker in the input is **preserved**
+          across rounds when this call drops zero new groups. The marker is
+          the audit record that history was already truncated; it must
+          survive subsequent compactions until/unless replaced by a fresher
+          one. (When new groups ARE dropped this round, the fresh marker
+          subsumes the old; we still emit only one marker.)
         """
         messages = list(state.messages)
 
         # 1. Separate original system prompts (always preserved) from any
-        #    previous truncation marker (replaced) and from the rest.
+        #    previous truncation marker (carried forward conditionally) and
+        #    from the rest.
         original_system: list[Message] = []
+        prior_marker: Optional[Message] = None
         non_system: list[Message] = []
         for m in messages:
             if m.role == Role.SYSTEM and not self.is_truncation_marker(m):
                 original_system.append(m)
             elif self.is_truncation_marker(m):
-                # Drop prior marker; we'll re-emit a fresh one if needed.
+                # Keep the most recent prior marker so we can re-emit it if
+                # this call drops no new groups (preserves audit trail).
+                prior_marker = m
                 continue
             else:
                 non_system.append(m)
 
         # 2. SYSTEM-only over-budget: nothing to drop. Return state with the
-        #    prior marker removed (we already filtered it out). This makes
-        #    the compactor idempotent in that pathological case instead of
+        #    prior marker preserved (if it existed). This makes the
+        #    compactor idempotent in that pathological case instead of
         #    looping on its own marker.
         if not non_system:
             new_state = self._clone(state)
-            new_state.messages = list(original_system)
+            new_messages = list(original_system)
+            if prior_marker is not None:
+                new_messages.append(prior_marker)
+            new_state.messages = new_messages
             return new_state
 
         # 3. Group the non-system messages into atomic transcript units.
         groups = self._split_into_groups(non_system)
 
         # 4. Estimate the system "floor" we must always keep, then drop
-        #    oldest groups until SYSTEM + kept_tail fits under max_tokens
-        #    (or we hit the soft floor enforced by keep_last_turns /
-        #    keep_recent_messages).
+        #    oldest groups until SYSTEM + kept_tail + MARKER fits under
+        #    max_tokens (or we hit the soft floor enforced by
+        #    keep_last_turns / keep_recent_messages).
         system_tokens = sum(
             _estimate_message_tokens(m, self.token_estimator)
             for m in original_system
         )
+
+        # Codex round 3 P2 (token_aware.py:196): account for the marker's
+        # own token cost in the partition. We don't yet know the
+        # dropped-count, so reserve based on a placeholder, then re-check
+        # once we know the actual count. One re-partition is sufficient
+        # because the marker text grows logarithmically with the count,
+        # so the second estimate either matches or differs by a tiny
+        # amount that the soft floor absorbs.
+        def _marker_reservation(dropped_count: int) -> int:
+            return _estimate_message_tokens(
+                self._make_truncation_marker(dropped_count),
+                self.token_estimator,
+            )
+
+        # First pass: reserve marker tokens assuming a moderate drop count.
+        # Any positive count yields a marker text close in length to the
+        # final one (the count's decimal width grows slowly).
+        marker_reserve = _marker_reservation(max(1, len(groups)))
         kept_groups, dropped_groups = self._partition_groups(
-            groups, system_tokens=system_tokens
+            groups,
+            system_tokens=system_tokens,
+            marker_tokens=marker_reserve if marker_reserve else 0,
         )
 
-        # 5. Rebuild flat message list with the marker if anything dropped.
+        # Second pass: if the actual dropped-count yields a different
+        # marker estimate, re-partition once with the true reservation.
+        dropped_message_count = sum(len(g) for g in dropped_groups)
+        if dropped_message_count > 0:
+            actual_marker_tokens = _marker_reservation(dropped_message_count)
+            if actual_marker_tokens != marker_reserve:
+                kept_groups, dropped_groups = self._partition_groups(
+                    groups,
+                    system_tokens=system_tokens,
+                    marker_tokens=actual_marker_tokens,
+                )
+                dropped_message_count = sum(len(g) for g in dropped_groups)
+
+        # 5. Rebuild flat message list with the marker if anything dropped
+        #    OR if a prior marker existed and must be carried forward.
         kept_messages: list[Message] = []
         for g in kept_groups:
             kept_messages.extend(g)
-        dropped_messages: list[Message] = []
-        for g in dropped_groups:
-            dropped_messages.extend(g)
 
         new_messages: list[Message] = list(original_system)
-        if dropped_messages:
-            new_messages.append(self._make_truncation_marker(len(dropped_messages)))
+        if dropped_message_count > 0:
+            # Fresh marker subsumes any prior marker for this round.
+            new_messages.append(
+                self._make_truncation_marker(dropped_message_count)
+            )
+        elif prior_marker is not None:
+            # No new drops this round — preserve the prior marker verbatim
+            # so the audit trail of past truncation isn't silently lost.
+            new_messages.append(prior_marker)
         new_messages.extend(kept_messages)
 
         new_state = self._clone(state)
@@ -299,14 +358,20 @@ class TokenAwareCompactor:
         self,
         groups: list[list[Message]],
         system_tokens: int = 0,
+        marker_tokens: int = 0,
     ) -> tuple[list[list[Message]], list[list[Message]]]:
         """Decide which groups to keep (tail) and which to drop (head).
 
         Budget-driven (codex verify P2): we drop oldest groups one at a
-        time until ``system_tokens + kept_group_tokens ≤ max_tokens``,
-        snapping at atomic group boundaries. The soft floor enforced by
-        ``keep_last_turns`` and ``keep_recent_messages`` bounds the
-        minimum size of the kept tail.
+        time until ``system_tokens + marker_tokens + kept_group_tokens
+        ≤ max_tokens``, snapping at atomic group boundaries. The soft
+        floor enforced by ``keep_last_turns`` and ``keep_recent_messages``
+        bounds the minimum size of the kept tail.
+
+        ``marker_tokens`` is the caller's reservation for the truncation
+        marker that will be inserted between system and kept-tail when
+        any group is dropped (codex round 3 P2: token_aware.py:196). Pass
+        0 if no marker will be emitted.
 
         Floor semantics match the v0.1 contract: the kept-tail floor is
         ``min(2 * keep_last_turns, keep_recent_messages)`` messages — the
@@ -353,9 +418,9 @@ class TokenAwareCompactor:
 
         # ----- budget-driven cut ---------------------------------------
         # Walk from the tail forward; accumulate kept-tail tokens. Stop
-        # adding once tokens + system would exceed budget, but never
-        # shrink below ``min_kept`` groups.
-        budget = max(0, self.max_tokens - system_tokens)
+        # adding once tokens + system + marker would exceed budget, but
+        # never shrink below ``min_kept`` groups.
+        budget = max(0, self.max_tokens - system_tokens - marker_tokens)
         kept_count = 0
         kept_tokens = 0
         for k in range(1, len(groups) + 1):
