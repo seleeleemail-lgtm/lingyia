@@ -396,6 +396,111 @@ class SubAgentToolTests(unittest.TestCase):
         # The runtime serializes the dict via str(), so check the substring.
         self.assertIn("run_id", tool_results[0].content)
 
+    def test_sub_agent_cost_is_not_charged_to_parent_budget(self):
+        """Codex verify P2 (sub_agent.py:24): the docstring used to claim
+        ``propagate_cost=True`` makes the parent runtime include sub-agent
+        cost in its ``max_cost_usd`` budget tracking. The runtime only
+        accumulates ``Decision.usage.cost_usd`` per parent decision, so
+        sub-agent cost is **surfaced in the tool result payload** but never
+        charged to the parent's budget. This test pins that reality so the
+        documented behavior stays in sync with the code (option A: align
+        docstring to reality, do not implement cross-runtime accounting).
+        """
+        from lingyia_kit.tools import sub_agent_tool
+        from lingyia_core.state import ModelUsage
+
+        # Sub-agent: emits one expensive FINAL_ANSWER (cost=$5).
+        class _ExpensiveSubModel:
+            capabilities = _FAKE_CAPS
+
+            async def adecide(self, ctx, state, tools):
+                return Decision(
+                    kind=Decision.final_answer("sub answer").kind,
+                    content=(TextBlock(text="sub answer"),),
+                    usage=ModelUsage(
+                        prompt_tokens=0,
+                        completion_tokens=0,
+                        model_id="mock",
+                        cost_usd=5.0,
+                    ),
+                )
+
+        sub_rt = Runtime.dev(model=_ExpensiveSubModel(), max_iterations=2)
+        sub_rt.telemetry = NoopTelemetry()
+        sub_harness = Harness()
+        sub_tool = sub_agent_tool(
+            name="research",
+            description="Run a research sub-agent.",
+            runtime=sub_rt,
+            harness=sub_harness,
+            propagate_cost=True,  # Legacy/no-op flag — kept for back-compat.
+        )
+
+        # Parent: emits one tool call (cost=$0), then one FINAL_ANSWER
+        # (cost=$0). Total parent cost should be $0; sub-agent cost ($5)
+        # surfaces in the tool result but must NOT be charged to the
+        # parent's max_cost_usd=1.0 budget.
+        class _ParentModel:
+            capabilities = _FAKE_CAPS
+
+            def __init__(self):
+                self.n = 0
+
+            async def adecide(self, ctx, state, tools):
+                self.n += 1
+                if self.n == 1:
+                    return Decision(
+                        kind=Decision.call_tools([
+                            ToolUseBlock(id="r-1", name="research", input={"goal": "x"}),
+                        ]).kind,
+                        content=(ToolUseBlock(id="r-1", name="research", input={"goal": "x"}),),
+                        usage=ModelUsage(
+                            prompt_tokens=0, completion_tokens=0,
+                            model_id="mock", cost_usd=0.0,
+                        ),
+                    )
+                return Decision(
+                    kind=Decision.final_answer("done").kind,
+                    content=(TextBlock(text="done"),),
+                    usage=ModelUsage(
+                        prompt_tokens=0, completion_tokens=0,
+                        model_id="mock", cost_usd=0.0,
+                    ),
+                )
+
+        parent_harness = Harness(tools=[sub_tool])
+        # Strict $1 budget; sub-agent costs $5 — if propagation were real,
+        # this would FAIL with budget exceeded. Per docstring (post-fix):
+        # sub-agent cost is NOT charged to parent budget, so the run
+        # completes.
+        parent_rt = Runtime.dev(
+            model=_ParentModel(),
+            max_iterations=4,
+            max_cost_usd=1.0,
+        )
+        parent_rt.telemetry = NoopTelemetry()
+        result = asyncio.run(parent_rt.arun(parent_harness, "delegate"))
+
+        # Parent run completed (would have failed with "budget exceeded"
+        # if sub-agent cost actually propagated into max_cost_usd).
+        self.assertEqual(result.status, RunStatus.COMPLETED, result.reason)
+
+        # Parent's accumulated cost is its own decisions' cost only ($0).
+        parent_cost = float(result.state.metadata.get("cost_usd", 0.0) or 0.0)
+        self.assertEqual(parent_cost, 0.0, (
+            f"sub-agent cost leaked into parent budget; parent cost={parent_cost}"
+        ))
+
+        # Sub-agent cost is still surfaced in the tool result payload
+        # (visible to callers that want to aggregate manually).
+        tool_results = [
+            b for m in result.state.messages
+            for b in m.content
+            if isinstance(b, ToolResultBlock)
+        ]
+        self.assertEqual(len(tool_results), 1)
+        self.assertIn("5.0", tool_results[0].content)
+
 
 if __name__ == "__main__":
     unittest.main()

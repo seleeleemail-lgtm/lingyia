@@ -2,9 +2,11 @@
 
 This is the canonical agent-as-tool pattern. The parent agent calls the
 sub-agent like any other tool; the sub-agent runs its own loop with its own
-state, tools, telemetry, then returns a structured result. Cost and token
-counts are surfaced in the tool's output so the parent run's budget
-accounting stays correct.
+state, tools, telemetry, then returns a structured result. The sub-agent's
+total cost is surfaced in the tool's output payload so callers can read
+it directly off the ToolResultBlock — but it is **not** automatically
+charged to the parent runtime's ``max_cost_usd`` budget (see "Cost model"
+below).
 
 When to use:
 - Task decomposition: parent plans, sub-agents execute.
@@ -21,10 +23,19 @@ Cost / state model:
   trace, checkpoint. The parent only sees the sub-agent's final summary +
   cost in the tool result, surfaced as a ToolResultBlock in the parent's
   transcript.
-- The parent's cost accumulator gets a delta equal to the sub-agent's
-  total cost (so per-run budgets work across nested agents).
-- Telemetry events from the sub-agent flow through the sub-agent's own sink,
-  not the parent's. Wire them to the same backend for correlated traces.
+- **Cost is NOT propagated.** ``Runtime`` accumulates
+  ``state.metadata["cost_usd"]`` from ``Decision.usage.cost_usd`` on each
+  *parent* decision; sub-agent cost lives on the sub-agent's own state
+  and is reported in the tool result dict (``output["cost_usd"]``) plus
+  the ``sub_agent_cost`` telemetry event below. Callers that need unified
+  cost accounting must aggregate manually — e.g. wrap the parent runtime
+  with a ``cost_estimator`` that inspects tool results, or sum cost in
+  application code from telemetry. This was previously documented as
+  automatic propagation; codex verify P2 caught that the runtime never
+  honors that contract, so the doc is now aligned with reality.
+- Telemetry: events from the sub-agent flow through the sub-agent's own
+  telemetry sink, not the parent's. Wire both runtimes to the same backend
+  for correlated traces.
 """
 from __future__ import annotations
 
@@ -69,8 +80,14 @@ def sub_agent_tool(
         Extra JSON Schema properties to expose on the tool (will be ignored
         by the sub-agent's loop unless the harness uses them via metadata).
     propagate_cost:
-        If True (default), surface the sub-agent's cost in the tool result
-        so the parent's budget tracking includes it.
+        **Deprecated / no-op.** Historically claimed to feed sub-agent cost
+        into the parent's ``max_cost_usd`` accounting; the runtime never
+        honored that contract (codex verify P2). The sub-agent's cost is
+        always surfaced on ``output["cost_usd"]`` regardless of this flag.
+        Kept as a keyword argument for backward-compatibility — pass any
+        value or omit. A future v0.2.1 may either implement true
+        propagation via a runtime-level cost hook or remove this flag
+        entirely.
 
     The returned ``ToolResult.output`` is a dict with:
         - ``summary``       — final answer or failure reason
@@ -126,13 +143,14 @@ def sub_agent_tool(
             error="" if ok else (sub_result.reason or "sub-agent did not complete"),
         )
 
-        # Cost propagation note: the runtime accumulates cost from
-        # Decision.usage during the model loop, not from tool results. The
-        # parent's harness/validator can read the sub-agent's cost off the
-        # ToolResultBlock content (this dict's "cost_usd" key) and decide
-        # what to do. For automatic accumulation we recommend the parent
-        # runtime's cost_estimator hook to inspect the tool's structured
-        # result. This tool surfaces it explicitly.
+        # Cost is NOT propagated to the parent runtime's max_cost_usd
+        # budget. Runtime.max_cost_usd only checks state.metadata["cost_usd"]
+        # which is accumulated from Decision.usage.cost_usd per parent
+        # decision (not from tool results). The sub-agent's cost is
+        # surfaced in output["cost_usd"] so callers can aggregate manually
+        # — e.g. a custom cost_estimator on the parent runtime, or
+        # post-processing the telemetry stream. See module docstring;
+        # ``propagate_cost`` is a deprecated no-op flag (codex verify P2).
         return result
 
     return Tool.from_async(
