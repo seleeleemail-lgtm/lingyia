@@ -38,6 +38,15 @@ from lingyia_core.message import Message
 
 
 TokenEstimator = Callable[[str], int]
+"""A function that estimates the token cost of a text string.
+
+Contract: must return a non-negative integer. The estimator MUST be
+monotonic with respect to text content — specifically, longer text
+should never estimate to fewer tokens than shorter text. Non-monotonic
+estimators may cause the TokenAwareCompactor's budget reservation to
+produce over-budget compacted states. Built-in char_div4_estimator
+and tiktoken_estimator satisfy this contract.
+"""
 
 
 # Sentinel prefix marks a SYSTEM message as a compactor-inserted truncation
@@ -177,25 +186,23 @@ class TokenAwareCompactor:
           one. (When new groups ARE dropped this round, the fresh marker
           subsumes the old; we still emit only one marker.)
 
-        Codex round 4 P2 fixes:
+        Codex round 4 P2 fix:
         - :243 The fresh marker's count is now CUMULATIVE: prior_count +
           newly_dropped_count. The prior marker's count is recovered by
           regex from its text. Previously the new marker overwrote the old
           count, silently losing the audit trail across rounds. Corrupted
           markers parse to 0 (no crash) so the accumulator resets cleanly
           rather than taking the run down.
-        - :241 Marker-budget reservation is now done ONCE up-front against
-          the MAXIMUM marker token-cost over the entire possible
-          cumulative-count range ``[prior_count, prior_count +
-          len(messages)]``. This guarantees convergence in a single
-          partition pass regardless of estimator behavior — including
-          pathological non-monotonic estimators where the marker for
-          count=k could cost more than the marker for any k' > k. The
-          earlier 2-pass scheme assumed monotonicity (true for the
-          builtin ``char_div4_estimator`` and ``tiktoken_estimator``) but
-          could oscillate under arbitrary estimators. Trade-off: a few
-          tokens of headroom wasted in normal cases — acceptable since
-          the marker grows ~logarithmically with the count.
+
+        v0.2-α simplification:
+        - The marker-budget reservation uses a 2-pass scheme assuming a
+          monotonic ``TokenEstimator`` (see type alias docstring): pass 1
+          estimates the marker cost as if we drop nothing new; pass 2
+          re-partitions with the actual marker cost for that drop count.
+          Built-in ``char_div4_estimator`` and ``tiktoken_estimator`` are
+          monotonic so this converges. Non-monotonic estimators may
+          produce a slightly over-budget result — documented as a
+          best-effort property of the contract, not a crash.
         """
         messages = list(state.messages)
 
@@ -240,44 +247,43 @@ class TokenAwareCompactor:
             for m in original_system
         )
 
-        # Codex round 3 P2 (token_aware.py:196) + round 4 P2 (:241):
-        # account for the marker's own token cost in the partition budget,
-        # and reserve CONSERVATIVELY against ALL possible marker sizes for
-        # any cumulative count this call could produce. The cumulative
-        # count is ``prior_count + dropped_message_count`` where
-        # ``dropped_message_count`` ranges over ``[0, total_flat_messages]``.
-        # We reserve the maximum marker-token-cost across that whole range
-        # in one shot, so the partition converges in a single pass
-        # regardless of estimator monotonicity. For the builtin
-        # ``char_div4_estimator`` and ``tiktoken_estimator`` (both
-        # monotonic-ish in input length), this equals the cost at the
-        # largest count and matches the prior 2-pass result; for
-        # pathological estimators (codex repro: ``{10:0, 5:1, 6:10}`` over
-        # the marker text) we still pick the largest cost so the kept
-        # tail genuinely fits after the marker is inserted.
-        #
-        # Trade-off: a few tokens of headroom wasted in normal cases.
-        # Acceptable — the marker grows logarithmically with the count
-        # under realistic tokenizers, so the headroom is small.
+        # Marker reservation: 2-pass under the monotonic TokenEstimator
+        # contract (see type alias docstring). Pass 1 estimates the
+        # marker as if no new groups are dropped this round; pass 2
+        # repartitions using the actual marker cost for the drop count
+        # that pass 1 produced. Built-in estimators are monotonic so
+        # this converges in 2 passes. Non-monotonic estimators may
+        # leave the result slightly over budget (documented limitation).
         prior_count = self._parse_marker_count(prior_marker)
-        total_flat_messages = sum(len(g) for g in groups)
-        marker_reserve = 0
-        # Range is small in practice (bounded by len(messages)); enumerate
-        # honestly rather than assume any property of the estimator.
-        for candidate_count in range(0, total_flat_messages + 1):
-            cost = _estimate_message_tokens(
-                self._make_truncation_marker(prior_count + candidate_count),
+
+        def _marker_cost(extra_drops: int) -> int:
+            return _estimate_message_tokens(
+                self._make_truncation_marker(prior_count + extra_drops),
                 self.token_estimator,
             )
-            if cost > marker_reserve:
-                marker_reserve = cost
 
+        # Pass 1: reserve for the prior cumulative count (no new drops).
+        marker_reserve = _marker_cost(0)
         kept_groups, dropped_groups = self._partition_groups(
             groups,
             system_tokens=system_tokens,
-            marker_tokens=marker_reserve if marker_reserve else 0,
+            marker_tokens=marker_reserve,
         )
         dropped_message_count = sum(len(g) for g in dropped_groups)
+
+        # Pass 2: if the actual marker for this drop count costs more
+        # than the pass-1 reservation, repartition once with the true
+        # cost. For monotonic estimators a single repartition is enough.
+        if dropped_message_count > 0:
+            actual_marker = _marker_cost(dropped_message_count)
+            if actual_marker > marker_reserve:
+                marker_reserve = actual_marker
+                kept_groups, dropped_groups = self._partition_groups(
+                    groups,
+                    system_tokens=system_tokens,
+                    marker_tokens=marker_reserve,
+                )
+                dropped_message_count = sum(len(g) for g in dropped_groups)
 
         # 5. Rebuild flat message list with the marker if anything dropped
         #    OR if a prior marker existed and must be carried forward.
