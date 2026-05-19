@@ -121,6 +121,16 @@ class TokenAwareCompactor:
         keep_recent_messages: int = 20,
         token_estimator: Optional[TokenEstimator] = None,
     ):
+        """Construct a token-aware compactor.
+
+        ``keep_last_turns`` and ``keep_recent_messages`` are **soft floors**:
+        they bound the minimum size of the kept tail, regardless of budget.
+        The cut still drops oldest groups until total estimated tokens
+        ≤ ``max_tokens`` (or until the floor is hit). If the floor itself
+        exceeds budget, the compactor returns the floor unchanged — and
+        ``should_compact`` may still report True ("irreducible system+tail
+        floor"). This is documented as a non-recoverable condition.
+        """
         if max_tokens <= 0:
             raise ValueError("max_tokens must be positive")
         self.max_tokens = max_tokens
@@ -140,6 +150,13 @@ class TokenAwareCompactor:
     def compact(self, state: RunState) -> RunState:
         """Return a new state with oldest groups dropped, original system
         prompts preserved, a single truncation marker inserted.
+
+        Compaction is **budget-driven** (codex verify P2: token_aware.py:275):
+        oldest atomic groups are dropped one at a time until total estimated
+        tokens ≤ ``max_tokens`` OR the keep_last_turns / keep_recent_messages
+        soft floor is reached. The earlier count-based partition could leave
+        state above budget after a single compact() call, making
+        should_compact() stay True forever in pathological setups.
         """
         messages = list(state.messages)
 
@@ -168,11 +185,17 @@ class TokenAwareCompactor:
         # 3. Group the non-system messages into atomic transcript units.
         groups = self._split_into_groups(non_system)
 
-        # 4. Pick the kept-tail by working back from the end. We keep at
-        #    least ``keep_last_turns * 2`` messages worth of groups (the
-        #    pair counts assistant + user turn), and at least
-        #    ``keep_recent_messages`` worth.
-        kept_groups, dropped_groups = self._partition_groups(groups)
+        # 4. Estimate the system "floor" we must always keep, then drop
+        #    oldest groups until SYSTEM + kept_tail fits under max_tokens
+        #    (or we hit the soft floor enforced by keep_last_turns /
+        #    keep_recent_messages).
+        system_tokens = sum(
+            _estimate_message_tokens(m, self.token_estimator)
+            for m in original_system
+        )
+        kept_groups, dropped_groups = self._partition_groups(
+            groups, system_tokens=system_tokens
+        )
 
         # 5. Rebuild flat message list with the marker if anything dropped.
         kept_messages: list[Message] = []
@@ -275,36 +298,87 @@ class TokenAwareCompactor:
     def _partition_groups(
         self,
         groups: list[list[Message]],
+        system_tokens: int = 0,
     ) -> tuple[list[list[Message]], list[list[Message]]]:
         """Decide which groups to keep (tail) and which to drop (head).
 
-        Matches v0.1 semantics: the *cut index* is the larger of
-        ``len - keep_last_turns*2`` and ``len - keep_recent_messages``
-        (i.e. drop more = keep less). The atomic-group rule means we
-        always snap the cut to a group boundary instead of slicing a
-        message in half.
+        Budget-driven (codex verify P2): we drop oldest groups one at a
+        time until ``system_tokens + kept_group_tokens ≤ max_tokens``,
+        snapping at atomic group boundaries. The soft floor enforced by
+        ``keep_last_turns`` and ``keep_recent_messages`` bounds the
+        minimum size of the kept tail.
+
+        Floor semantics match the v0.1 contract: the kept-tail floor is
+        ``min(2 * keep_last_turns, keep_recent_messages)`` messages — the
+        MORE PERMISSIVE of the two constraints (whichever allows cutting
+        more). This is the same as the prior count-based
+        ``max(flat - 2*kl, flat - kr)`` cut formula, re-expressed as a
+        floor instead of a cut bound. Translated to groups, we keep at
+        least the trailing N groups whose total message count first
+        meets that floor.
+
+        If respecting the floor leaves us still over budget, we keep the
+        floor anyway — the caller is in the irreducible-floor regime
+        documented on ``compact()``.
         """
         if not groups:
             return [], []
 
-        # Flatten to track per-message cut, then snap to group boundary.
-        flat_count = sum(len(g) for g in groups)
-        target_cut_msgs = max(
-            flat_count - 2 * self.keep_last_turns,
-            flat_count - self.keep_recent_messages,
-        )
-        target_cut_msgs = max(0, target_cut_msgs)
+        # Pre-compute token cost of each group so we can scan cheaply.
+        group_tokens = [
+            sum(_estimate_message_tokens(m, self.token_estimator) for m in g)
+            for g in groups
+        ]
 
-        # Walk groups front-to-back; everything up to the group whose
-        # END crosses target_cut_msgs is dropped.
-        msg_so_far = 0
-        cut_group_idx = 0
-        for idx, g in enumerate(groups):
-            if msg_so_far >= target_cut_msgs:
-                cut_group_idx = idx
+        # ----- soft floor: minimum kept-group count -------------------
+        # The floor in *messages* is the smaller of the two constraints
+        # (whichever allows MORE truncation, mirroring v0.1 ``max(cut1,
+        # cut2)`` which picks the larger cut = smaller kept).
+        floor_in_msgs = min(2 * self.keep_last_turns, self.keep_recent_messages)
+        floor_in_msgs = max(0, floor_in_msgs)
+
+        # Convert the message-floor to a group-floor by walking back from
+        # the tail until the flattened message count reaches the floor.
+        flat_lens = [len(g) for g in groups]
+        msgs_walked = 0
+        min_kept = 0
+        for k in range(1, len(groups) + 1):
+            msgs_walked += flat_lens[-k]
+            min_kept = k
+            if msgs_walked >= floor_in_msgs:
                 break
-            msg_so_far += len(g)
-            cut_group_idx = idx + 1
+        if floor_in_msgs == 0:
+            min_kept = 0
+        min_kept = min(min_kept, len(groups))
+
+        # ----- budget-driven cut ---------------------------------------
+        # Walk from the tail forward; accumulate kept-tail tokens. Stop
+        # adding once tokens + system would exceed budget, but never
+        # shrink below ``min_kept`` groups.
+        budget = max(0, self.max_tokens - system_tokens)
+        kept_count = 0
+        kept_tokens = 0
+        for k in range(1, len(groups) + 1):
+            cost = group_tokens[-k]
+            # Always honor the soft floor: we must accept at least
+            # ``min_kept`` groups regardless of cost.
+            if k <= min_kept:
+                kept_count = k
+                kept_tokens += cost
+                continue
+            # Past the floor: only accept this group if it still fits.
+            if kept_tokens + cost > budget:
+                break
+            kept_count = k
+            kept_tokens += cost
+
+        # Edge case: if even ``min_kept`` overshoots the budget, kept_count
+        # may have been set to min_kept already — we accept that ("kept
+        # tail is the floor") rather than dropping into it, because
+        # dropping below the floor would lose the recent context every
+        # caller needs.
+
+        cut_group_idx = len(groups) - kept_count
         dropped = groups[:cut_group_idx]
         kept = groups[cut_group_idx:]
         return kept, dropped

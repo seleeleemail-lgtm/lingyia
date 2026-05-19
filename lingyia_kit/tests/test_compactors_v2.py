@@ -286,3 +286,136 @@ def test_tool_group_with_dangling_tool_use_at_cut_boundary_dropped():
     assert result_ids.issubset(use_ids), (
         f"orphan tool_result ids: {result_ids - use_ids}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Budget-driven partition (codex verify P2 :275)
+# ---------------------------------------------------------------------------
+
+
+def _estimate_state_tokens(state: RunState, estimator) -> int:
+    from lingyia_kit.compactors.token_aware import _estimate_message_tokens
+    return sum(_estimate_message_tokens(m, estimator) for m in state.messages)
+
+
+def test_compaction_respects_token_budget():
+    """Codex verify P2 (token_aware.py:275): _partition_groups used to drop
+    by message count (keep_last_turns / keep_recent_messages) instead of
+    token budget. After ``compact()`` the total token count could still
+    exceed ``max_tokens`` — making ``should_compact()`` keep returning True
+    and (if the caller loops) burning iterations on no-progress compactions.
+
+    With the budget-driven fix, a single compact() call brings the state
+    at or below max_tokens (the kept tail + system + marker all fit) so
+    long as the soft floor is reachable within budget. This test sizes
+    the soft floor to be smaller than the budget so we're outside the
+    irreducible-floor regime.
+    """
+    # Large history of ordinary chatter (≈30 tokens per message) and a
+    # budget that allows the soft floor (2 messages ≈ 60 tokens) plus
+    # a comfortable margin for the truncation marker (≈18 tokens).
+    msgs = []
+    for i in range(40):
+        msgs.append(_u(f"user msg {i} " * 12))  # ~36 chars → ~9 tokens
+        msgs.append(_a(f"assistant msg {i} " * 12))
+    state = RunState(messages=msgs, run_id="x")
+
+    c = TokenAwareCompactor(
+        max_tokens=200,
+        keep_last_turns=1,
+        keep_recent_messages=2,
+        token_estimator=char_div4_estimator,
+    )
+    assert c.should_compact(state)
+
+    new_state = c.compact(state)
+    new_total = _estimate_state_tokens(new_state, char_div4_estimator)
+    assert new_total <= c.max_tokens, (
+        f"compaction did not bring state within budget: "
+        f"new_total={new_total} > max_tokens={c.max_tokens}"
+    )
+    assert not c.should_compact(new_state), (
+        "should_compact() still returns True after compact() — caller would "
+        "loop forever in pathological setups"
+    )
+
+
+def test_system_alone_over_budget_is_idempotent():
+    """If SYSTEM messages alone exceed the budget, compact() must be
+    idempotent: calling it again yields the same state (no marker
+    accumulation, no loss of system prompt, no oscillation).
+
+    should_compact() may legitimately stay True in this irreducible-floor
+    case — the compactor documents that it cannot reduce below SYSTEM+tail.
+    What it MUST NOT do is mutate state across repeated calls.
+    """
+    big_system = Message(
+        role=Role.SYSTEM,
+        content=(TextBlock(text="x" * 4000),),
+    )
+    # Add a couple of non-system messages so the tail is non-empty.
+    state = RunState(
+        messages=[big_system, _u("hi"), _a("hello")],
+        run_id="x",
+    )
+    c = TokenAwareCompactor(
+        max_tokens=10, keep_last_turns=1, token_estimator=char_div4_estimator
+    )
+    assert c.should_compact(state)
+
+    s1 = c.compact(state)
+    s2 = c.compact(s1)
+    s3 = c.compact(s2)
+
+    # Idempotence: messages are identical (by role + text) across rounds.
+    def _shape(st):
+        return [
+            (m.role, tuple(getattr(b, "text", str(type(b).__name__)) for b in m.content))
+            for m in st.messages
+        ]
+    assert _shape(s1) == _shape(s2) == _shape(s3), (
+        "compact() is not idempotent on the SYSTEM-alone-over-budget floor; "
+        f"s1={_shape(s1)} s2={_shape(s2)} s3={_shape(s3)}"
+    )
+
+
+def test_dropped_groups_inserts_single_marker_not_multiple():
+    """Compact then compact again on an even larger transcript. Across N
+    rounds there must be at most ONE truncation marker in the final state
+    (the latest), never accumulating one per round.
+
+    Distinct from test_repeated_compaction_does_not_stack_truncation_markers
+    above by stressing the count-based marker placement under budget
+    pressure (large dropped span, small kept tail).
+    """
+    msgs = []
+    for i in range(60):
+        msgs.append(_u(f"u{i} " * 10))
+        msgs.append(_a(f"a{i} " * 10))
+    state = RunState(messages=msgs, run_id="x")
+
+    c = TokenAwareCompactor(
+        max_tokens=40,
+        keep_last_turns=1,
+        keep_recent_messages=2,
+        token_estimator=char_div4_estimator,
+    )
+    s1 = c.compact(state)
+    # Add more chatter, compact again.
+    for i in range(60, 120):
+        s1.messages.append(_u(f"u{i} " * 10))
+        s1.messages.append(_a(f"a{i} " * 10))
+    s2 = c.compact(s1)
+    # And a third time.
+    for i in range(120, 180):
+        s2.messages.append(_u(f"u{i} " * 10))
+        s2.messages.append(_a(f"a{i} " * 10))
+    s3 = c.compact(s2)
+
+    marker_count = sum(
+        1 for m in s3.messages
+        if TokenAwareCompactor.is_truncation_marker(m)
+    )
+    assert marker_count == 1, (
+        f"truncation markers accumulated across rounds: {marker_count}"
+    )
