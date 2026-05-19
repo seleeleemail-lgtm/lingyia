@@ -404,14 +404,11 @@ class SubAgentToolTests(unittest.TestCase):
         self.assertIn("run_id", tool_results[0].content)
 
     def test_sub_agent_cost_is_not_charged_to_parent_budget(self):
-        """Codex verify P2 (sub_agent.py:24): the docstring used to claim
-        ``propagate_cost=True`` makes the parent runtime include sub-agent
-        cost in its ``max_cost_usd`` budget tracking. The runtime only
-        accumulates ``Decision.usage.cost_usd`` per parent decision, so
-        sub-agent cost is **surfaced in the tool result payload** but never
-        charged to the parent's budget. This test pins that reality so the
-        documented behavior stays in sync with the code (option A: align
-        docstring to reality, do not implement cross-runtime accounting).
+        """v0.2-α: sub-agent cost is **surfaced in the tool result payload**
+        (``output["cost_usd"]``) but never charged to the parent's
+        ``max_cost_usd`` budget. The runtime only accumulates
+        ``Decision.usage.cost_usd`` per parent decision; cross-runtime cost
+        propagation is a v0.2-γ concern.
         """
         from lingyia_kit.tools import sub_agent_tool
         from lingyia_core.state import ModelUsage
@@ -440,7 +437,6 @@ class SubAgentToolTests(unittest.TestCase):
             description="Run a research sub-agent.",
             runtime=sub_rt,
             harness=sub_harness,
-            propagate_cost=True,  # Legacy/no-op flag — kept for back-compat.
         )
 
         # Parent: emits one tool call (cost=$0), then one FINAL_ANSWER

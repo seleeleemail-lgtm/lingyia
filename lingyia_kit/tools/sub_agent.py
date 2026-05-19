@@ -56,7 +56,6 @@ def sub_agent_tool(
     harness: "Harness",
     goal_arg: str = "goal",
     additional_args: Optional[Mapping[str, Mapping[str, Any]]] = None,
-    propagate_cost: bool = True,
 ) -> Tool:
     """Build a Tool that runs a sub-agent.
 
@@ -79,15 +78,6 @@ def sub_agent_tool(
     additional_args:
         Extra JSON Schema properties to expose on the tool (will be ignored
         by the sub-agent's loop unless the harness uses them via metadata).
-    propagate_cost:
-        **Deprecated / no-op.** Historically claimed to feed sub-agent cost
-        into the parent's ``max_cost_usd`` accounting; the runtime never
-        honored that contract (codex verify P2). The sub-agent's cost is
-        always surfaced on ``output["cost_usd"]`` regardless of this flag.
-        Kept as a keyword argument for backward-compatibility — pass any
-        value or omit. A future v0.2.1 may either implement true
-        propagation via a runtime-level cost hook or remove this flag
-        entirely.
 
     The returned ``ToolResult.output`` is a dict with:
         - ``summary``       — final answer or failure reason
@@ -149,8 +139,8 @@ def sub_agent_tool(
         # decision (not from tool results). The sub-agent's cost is
         # surfaced in output["cost_usd"] so callers can aggregate manually
         # — e.g. a custom cost_estimator on the parent runtime, or
-        # post-processing the telemetry stream. See module docstring;
-        # ``propagate_cost`` is a deprecated no-op flag (codex verify P2).
+        # post-processing the telemetry stream. v0.2-γ will introduce a
+        # proper cost-propagation API.
         return result
 
     return Tool.from_async(
