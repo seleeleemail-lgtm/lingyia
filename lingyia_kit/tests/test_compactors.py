@@ -2,7 +2,7 @@
 import pytest
 
 from lingyia_core import RunState
-from lingyia_core.blocks import Role, TextBlock, ToolUseBlock, ToolResultBlock
+from lingyia_core.blocks import Role, TextBlock, ToolUseBlock, ToolResultBlock, TruncationBlock
 from lingyia_core.message import Message
 from lingyia_kit.compactors.token_aware import (
     TokenAwareCompactor, tiktoken_estimator, char_div4_estimator,
@@ -75,7 +75,10 @@ def test_compact_keeps_tool_use_and_result_adjacency():
 
 
 def test_compact_inserts_truncation_marker():
-    """After compaction, a synthetic SYSTEM message marks the truncation."""
+    """After compaction, a synthetic SYSTEM message marks the truncation.
+
+    Spec v0.2.0-β1a §7.1: marker is Message(SYSTEM, (TruncationBlock(count=N),)).
+    """
     c = TokenAwareCompactor(max_tokens=100, keep_last_turns=1, token_estimator=char_div4_estimator)
     state = _make_state_with_n_turns(10)
     new_state = c.compact(state)
@@ -83,9 +86,11 @@ def test_compact_inserts_truncation_marker():
     marker_msgs = [
         m for m in new_state.messages
         if m.role == Role.SYSTEM
-        and any(isinstance(b, TextBlock) and "truncated" in b.text.lower() for b in m.content)
+        and any(isinstance(b, TruncationBlock) for b in m.content)
     ]
     assert len(marker_msgs) >= 1
+    # The marker's TruncationBlock must carry a positive dropped-count.
+    assert marker_msgs[0].content[0].count > 0
 
 
 def test_compact_returns_new_state_not_mutates_input():

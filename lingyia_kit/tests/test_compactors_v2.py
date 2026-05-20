@@ -25,7 +25,7 @@ from __future__ import annotations
 import pytest
 
 from lingyia_core import RunState
-from lingyia_core.blocks import Role, TextBlock, ToolResultBlock, ToolUseBlock
+from lingyia_core.blocks import Role, TextBlock, ToolResultBlock, ToolUseBlock, TruncationBlock
 from lingyia_core.message import Message
 from lingyia_kit.compactors.token_aware import (
     TokenAwareCompactor,
@@ -75,7 +75,7 @@ def test_repeated_compaction_does_not_stack_truncation_markers():
     marker_count_1 = sum(
         1 for m in s1.messages
         if m.role == Role.SYSTEM
-        and any(isinstance(b, TextBlock) and "truncated" in b.text for b in m.content)
+        and any(isinstance(b, TruncationBlock) for b in m.content)
     )
     assert marker_count_1 == 1
 
@@ -89,7 +89,7 @@ def test_repeated_compaction_does_not_stack_truncation_markers():
     marker_count_2 = sum(
         1 for m in s2.messages
         if m.role == Role.SYSTEM
-        and any(isinstance(b, TextBlock) and "truncated" in b.text for b in m.content)
+        and any(isinstance(b, TruncationBlock) for b in m.content)
     )
     assert marker_count_2 == 1, "truncation markers stacked across rounds"
 
@@ -546,28 +546,25 @@ def test_marker_count_accumulates_across_compactions():
     s1 = c.compact(state)
 
     s1_markers = [
-        m.content[0].text for m in s1.messages
+        m.content[0] for m in s1.messages
         if TokenAwareCompactor.is_truncation_marker(m)
     ]
     assert len(s1_markers) == 1
-    # Recover the count from the marker text.
-    import re as _re
-    s1_count_match = _re.search(r"earlier (\d+) messages", s1_markers[0])
-    assert s1_count_match
-    s1_count = int(s1_count_match.group(1))
+    # Spec §7.1: marker content is TruncationBlock; read count directly.
+    assert isinstance(s1_markers[0], TruncationBlock)
+    s1_count = s1_markers[0].count
     assert s1_count > 0, "first round must have dropped at least one msg"
 
     # Append more chatter and compact again.
     s1.messages.extend([_msg(Role.USER, "y" * 20) for _ in range(6)])
     s2 = c.compact(s1)
     s2_markers = [
-        m.content[0].text for m in s2.messages
+        m.content[0] for m in s2.messages
         if TokenAwareCompactor.is_truncation_marker(m)
     ]
     assert len(s2_markers) == 1
-    s2_count_match = _re.search(r"earlier (\d+) messages", s2_markers[0])
-    assert s2_count_match
-    s2_count = int(s2_count_match.group(1))
+    assert isinstance(s2_markers[0], TruncationBlock)
+    s2_count = s2_markers[0].count
 
     # Cumulative invariant: s2's count strictly exceeds s1's count
     # (this round dropped additional messages).
