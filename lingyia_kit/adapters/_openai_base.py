@@ -30,6 +30,7 @@ from lingyia_core.blocks import (
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
+    TruncationBlock,
     block_to_dict,
 )
 from lingyia_core.capability import ModelCapabilities
@@ -40,6 +41,11 @@ DEFAULT_SYSTEM_PROMPT = (
     "You are an AI agent. Use the available tools to accomplish the user's goal. "
     "When the goal is fully accomplished, respond with a final answer instead of calling a tool."
 )
+
+
+def _truncation_to_text(b: TruncationBlock) -> str:
+    """Spec §8: flatten TruncationBlock to text at the provider boundary."""
+    return f"[earlier {b.count} messages omitted]"
 
 
 class OpenAICompatibleModel:
@@ -142,60 +148,100 @@ class OpenAICompatibleModel:
         context: Mapping[str, Any],
         state: RunState,
     ) -> list[dict[str, Any]]:
-        """v0.2: read state.messages, translate to OpenAI chat completion format."""
+        """v0.2: read state.messages, translate to OpenAI chat completion format.
+
+        Per spec §8.1, TruncationBlock is flattened to text at the wire
+        boundary. For each message we walk content in declaration order:
+        runs of non-truncation blocks are projected by the role-specific
+        logic; each TruncationBlock is emitted as its own system wire entry
+        between those runs. This preserves block-declaration order so
+        mixed-content messages (e.g. system instructions followed by a
+        truncation marker) do not silently drop either side.
+        """
         out: list[dict[str, Any]] = []
         for msg in state.messages:
-            if msg.role == Role.SYSTEM:
-                text = "".join(b.text for b in msg.content if isinstance(b, TextBlock))
-                out.append({"role": "system", "content": text})
+            # Partition this message's content into runs separated by
+            # TruncationBlocks. Each run is projected by the role-specific
+            # helper; each TruncationBlock becomes a standalone system entry.
+            run: list[Any] = []
+            for block in msg.content:
+                if isinstance(block, TruncationBlock):
+                    if run:
+                        out.extend(self._project_role_blocks(msg.role, run))
+                        run = []
+                    out.append({"role": "system", "content": _truncation_to_text(block)})
+                else:
+                    run.append(block)
+            if run:
+                out.extend(self._project_role_blocks(msg.role, run))
+        return out
 
-            elif msg.role == Role.USER:
-                # User messages may contain TextBlock OR ToolResultBlock
-                # (Anthropic style). OpenAI requires tool results as separate
-                # role="tool" messages, so we split them out here.
-                text_parts: list[Any] = []
-                for block in msg.content:
-                    if isinstance(block, TextBlock):
-                        text_parts.append(block.text)
-                    elif isinstance(block, ToolResultBlock):
-                        out.append({
-                            "role": "tool",
-                            "tool_call_id": block.tool_use_id,
-                            "content": self._flatten_tool_result(block.content),
-                        })
-                    elif isinstance(block, ImageBlock):
-                        text_parts.append(self._image_to_openai_part(block))
-                if text_parts:
-                    if all(isinstance(p, str) for p in text_parts):
-                        out.append({"role": "user", "content": "\n".join(text_parts)})
-                    else:
-                        # Has images — structured content array
-                        structured: list[dict[str, Any]] = []
-                        for p in text_parts:
-                            if isinstance(p, str):
-                                structured.append({"type": "text", "text": p})
-                            else:
-                                structured.append(p)
-                        out.append({"role": "user", "content": structured})
+    def _project_role_blocks(
+        self,
+        role: Role,
+        blocks: list[Any],
+    ) -> list[dict[str, Any]]:
+        """Project a single role's run of non-TruncationBlock content to wire entries.
 
-            elif msg.role == Role.ASSISTANT:
-                text = "".join(b.text for b in msg.content if isinstance(b, TextBlock))
-                tool_uses = [b for b in msg.content if isinstance(b, ToolUseBlock)]
-                entry: dict[str, Any] = {"role": "assistant"}
-                entry["content"] = text or None
-                if tool_uses:
-                    entry["tool_calls"] = [
-                        {
-                            "id": tu.id,
-                            "type": "function",
-                            "function": {
-                                "name": tu.name,
-                                "arguments": json.dumps(dict(tu.input), ensure_ascii=False),
-                            },
-                        }
-                        for tu in tool_uses
-                    ]
-                out.append(entry)
+        This is the original ``_build_messages`` per-role logic, extracted so
+        ``_build_messages`` can splice TruncationBlock flattening between runs
+        without losing any handling for TextBlock / ToolUseBlock /
+        ToolResultBlock / ImageBlock.
+        """
+        out: list[dict[str, Any]] = []
+
+        if role == Role.SYSTEM:
+            text = "".join(b.text for b in blocks if isinstance(b, TextBlock))
+            out.append({"role": "system", "content": text})
+
+        elif role == Role.USER:
+            # User messages may contain TextBlock OR ToolResultBlock
+            # (Anthropic style). OpenAI requires tool results as separate
+            # role="tool" messages, so we split them out here.
+            text_parts: list[Any] = []
+            for block in blocks:
+                if isinstance(block, TextBlock):
+                    text_parts.append(block.text)
+                elif isinstance(block, ToolResultBlock):
+                    out.append({
+                        "role": "tool",
+                        "tool_call_id": block.tool_use_id,
+                        "content": self._flatten_tool_result(block.content),
+                    })
+                elif isinstance(block, ImageBlock):
+                    text_parts.append(self._image_to_openai_part(block))
+            if text_parts:
+                if all(isinstance(p, str) for p in text_parts):
+                    out.append({"role": "user", "content": "\n".join(text_parts)})
+                else:
+                    # Has images — structured content array
+                    structured: list[dict[str, Any]] = []
+                    for p in text_parts:
+                        if isinstance(p, str):
+                            structured.append({"type": "text", "text": p})
+                        else:
+                            structured.append(p)
+                    out.append({"role": "user", "content": structured})
+
+        elif role == Role.ASSISTANT:
+            text = "".join(b.text for b in blocks if isinstance(b, TextBlock))
+            tool_uses = [b for b in blocks if isinstance(b, ToolUseBlock)]
+            entry: dict[str, Any] = {"role": "assistant"}
+            entry["content"] = text or None
+            if tool_uses:
+                entry["tool_calls"] = [
+                    {
+                        "id": tu.id,
+                        "type": "function",
+                        "function": {
+                            "name": tu.name,
+                            "arguments": json.dumps(dict(tu.input), ensure_ascii=False),
+                        },
+                    }
+                    for tu in tool_uses
+                ]
+            out.append(entry)
+
         return out
 
     def _flatten_tool_result(self, content: Any) -> str:

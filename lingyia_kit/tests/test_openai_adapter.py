@@ -106,3 +106,47 @@ def test_capabilities_gpt4o_includes_image():
 def test_capabilities_gpt35_text_only():
     m = OpenAIModel(api_key="x", model="gpt-3.5-turbo")
     assert BlockKind.IMAGE not in m.capabilities.accepts
+
+
+def test_openai_adapter_flattens_truncation_to_text():
+    """Spec §8.1: a Message(SYSTEM, (TruncationBlock(12),)) is projected to a
+    system wire entry containing '[earlier 12 messages omitted]'."""
+    from lingyia_core import RunState, Role, Message, TruncationBlock
+    from lingyia_kit.adapters._openai_base import OpenAICompatibleModel
+
+    m = OpenAICompatibleModel(api_key="x", base_url="http://x", model="gpt-4")
+    state = RunState(messages=[
+        Message(role=Role.SYSTEM, content=(TruncationBlock(count=12),)),
+    ])
+    built = m._build_messages({}, state)
+    assert len(built) == 1
+    assert built[0]["role"] == "system"
+    assert built[0]["content"] == "[earlier 12 messages omitted]"
+
+
+def test_openai_adapter_mixed_system_message_preserves_both():
+    """Spec §8.1 (codex P1.4): Message(SYSTEM, (TextBlock, TruncationBlock)) preserves
+    BOTH contents in block-declaration order on the wire — neither is silently dropped."""
+    from lingyia_core import RunState, Role, Message, TextBlock, TruncationBlock
+    from lingyia_kit.adapters._openai_base import OpenAICompatibleModel
+
+    m = OpenAICompatibleModel(api_key="x", base_url="http://x", model="gpt-4")
+    state = RunState(messages=[
+        Message(role=Role.SYSTEM, content=(
+            TextBlock(text="You are a helpful assistant."),
+            TruncationBlock(count=8),
+        )),
+    ])
+    built = m._build_messages({}, state)
+
+    # Implementation may emit one combined system message OR two — either is acceptable
+    # if order is preserved.
+    all_system_text = " ".join(
+        msg["content"] for msg in built if msg["role"] == "system" and isinstance(msg.get("content"), str)
+    )
+    assert "You are a helpful assistant." in all_system_text
+    assert "[earlier 8 messages omitted]" in all_system_text
+
+    instructions_pos = all_system_text.index("You are a helpful assistant.")
+    truncation_pos = all_system_text.index("[earlier 8 messages omitted]")
+    assert instructions_pos < truncation_pos, "TextBlock must appear before TruncationBlock in wire payload"
