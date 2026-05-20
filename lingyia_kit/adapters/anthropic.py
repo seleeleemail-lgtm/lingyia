@@ -30,6 +30,7 @@ from lingyia_core.blocks import (
     ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
+    TruncationBlock,
     block_to_dict,
 )
 from lingyia_core.capability import ModelCapabilities
@@ -39,6 +40,28 @@ from lingyia_core.state import DecisionKind, ModelUsage
 
 ANTHROPIC_API_BASE = "https://api.anthropic.com/v1"
 ANTHROPIC_API_VERSION = "2023-06-01"
+
+
+def _truncation_to_text(b: TruncationBlock) -> str:
+    """Spec §8: flatten TruncationBlock to text at the Anthropic API boundary."""
+    return f"[earlier {b.count} messages omitted]"
+
+
+def _project_system_message(msg: Message) -> str:
+    """Per spec §8.2 (codex P2.9): project a SYSTEM Message to Anthropic system
+    payload text. TextBlock content + TruncationBlock content joined in block
+    declaration order. Other block types in SYSTEM role are unusual and
+    defensively skipped — Anthropic's ``system`` field is plain text.
+    """
+    parts: list[str] = []
+    for b in msg.content:
+        if isinstance(b, TextBlock):
+            parts.append(b.text)
+        elif isinstance(b, TruncationBlock):
+            parts.append(_truncation_to_text(b))
+        # Other block types (tool_use, tool_result, image, thinking) are not
+        # meaningful in a SYSTEM message for Anthropic and are skipped.
+    return "\n".join(parts)
 
 
 class AnthropicModel:
@@ -112,7 +135,7 @@ class AnthropicModel:
         tools: Sequence[Any],
     ) -> Decision:
         anthropic_messages = self._build_anthropic_messages(state.messages)
-        system_text = self._extract_system_prompt(state.messages)
+        system_text = self._build_system_payload(state)
         tool_schemas = self._build_tool_schemas(tools)
 
         payload: dict[str, Any] = {
@@ -218,19 +241,26 @@ class AnthropicModel:
                 out.append({"role": api_role, "content": api_content})
         return out
 
-    def _extract_system_prompt(self, messages: list[Message]) -> str:
-        """Concatenate SYSTEM-role TextBlocks into a single Anthropic system
-        prompt. Non-text blocks in system messages are ignored — Anthropic's
-        ``system`` field is plain text.
+    def _build_system_payload(self, state: RunState) -> str:
+        """Per spec §8.2: build the Anthropic ``system`` API payload from state
+        SYSTEM messages. Each SYSTEM message is projected via
+        :func:`_project_system_message`, which flattens TextBlock + TruncationBlock
+        content in block-declaration order. Empty projections are filtered out
+        so the joined output never has leading/internal blank lines.
         """
-        sys_parts = [
-            b.text
-            for m in messages
+        system_parts = [
+            _project_system_message(m)
+            for m in state.messages
             if m.role == Role.SYSTEM
-            for b in m.content
-            if isinstance(b, TextBlock)
         ]
-        return "\n".join(sys_parts)
+        return "\n".join(p for p in system_parts if p)
+
+    def _extract_system_prompt(self, messages: list[Message]) -> str:
+        """Backward-compatible accessor. Prefer :meth:`_build_system_payload`,
+        which takes a :class:`RunState`. Kept for any caller still passing a
+        bare ``messages`` list.
+        """
+        return self._build_system_payload(RunState(messages=list(messages)))
 
     def _block_to_anthropic_dict(self, block: Any) -> dict[str, Any]:
         """Render a nested ContentBlock (inside a ToolResultBlock) into the

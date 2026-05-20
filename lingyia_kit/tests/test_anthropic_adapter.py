@@ -18,6 +18,7 @@ from lingyia_core.blocks import (
     ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
+    TruncationBlock,
 )
 from lingyia_core.capability import FailFastCapabilityPolicy
 from lingyia_core.message import Message
@@ -67,6 +68,65 @@ class TestAnthropicCapabilities(unittest.TestCase):
         # Must not raise.
         result = policy.apply(messages, self.model.capabilities)
         self.assertEqual(result, messages)
+
+
+def _resolve_system_payload(model: AnthropicModel, state: RunState):
+    """Locate the Anthropic system payload via whichever accessor the adapter exposes."""
+    if hasattr(model, "_build_system_payload"):
+        return model._build_system_payload(state)
+    if hasattr(model, "_extract_system_payload"):
+        return model._extract_system_payload(state)
+    if hasattr(model, "_extract_system_prompt"):
+        # legacy name on the v0.2 adapter
+        return model._extract_system_prompt(state.messages)
+    return None
+
+
+def _flatten_system_payload(payload) -> str:
+    if isinstance(payload, str):
+        return payload
+    if isinstance(payload, list):
+        return " ".join(
+            (p.get("text", "") if isinstance(p, dict) else str(p)) for p in payload
+        )
+    return str(payload) if payload is not None else ""
+
+
+def test_anthropic_adapter_flattens_truncation_to_text():
+    """Spec §8.2: Message(SYSTEM, (TruncationBlock(12),)) is projected into the
+    Anthropic system payload as '[earlier 12 messages omitted]'."""
+    m = AnthropicModel(api_key="x", model="claude-sonnet-4-6")
+    state = RunState(messages=[
+        Message(role=Role.SYSTEM, content=(TruncationBlock(count=12),)),
+    ])
+
+    system_payload = _resolve_system_payload(m, state)
+    assert system_payload is not None, "Could not find system payload in adapter"
+
+    text = _flatten_system_payload(system_payload)
+    assert "[earlier 12 messages omitted]" in text
+
+
+def test_anthropic_adapter_mixed_system_message_concatenates_in_order():
+    """Spec §8.2 (codex P2.9): mixed SYSTEM(TextBlock, TruncationBlock) preserves
+    both contents in block-declaration order in the Anthropic system payload."""
+    m = AnthropicModel(api_key="x", model="claude-sonnet-4-6")
+    state = RunState(messages=[
+        Message(role=Role.SYSTEM, content=(
+            TextBlock(text="You are a researcher."),
+            TruncationBlock(count=9),
+        )),
+    ])
+
+    system_payload = _resolve_system_payload(m, state)
+    assert system_payload is not None, "Could not find system payload in adapter"
+
+    text = _flatten_system_payload(system_payload)
+    assert "You are a researcher." in text
+    assert "[earlier 9 messages omitted]" in text
+    assert text.index("You are a researcher.") < text.index("[earlier 9 messages omitted]"), (
+        "TextBlock must appear before TruncationBlock in system payload"
+    )
 
 
 if __name__ == "__main__":
