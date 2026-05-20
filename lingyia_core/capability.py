@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Iterable, Protocol, runtime_checkable
 
-from .blocks import BlockKind, ContentBlock
+from .blocks import BlockKind, ContentBlock, ToolResultBlock, TruncationBlock
 from .message import Message
 
 
@@ -107,27 +107,26 @@ class CapabilityPolicy(Protocol):
 
 
 def _collect_block_kinds(messages: Iterable[Message]) -> frozenset[BlockKind]:
-    """Collect all BlockKinds present in messages. Recurses into ToolResultBlock content."""
-    found: set[BlockKind] = set()
+    """Walk all ContentBlocks in messages, returning kinds present.
+
+    Per spec §5 (codex P1.3): recurses into ToolResultBlock.content (which can be
+    a tuple of nested ContentBlocks). TruncationBlock is skipped at every depth
+    because it is runtime-authored, not a model capability.
+    """
+    kinds: set[BlockKind] = set()
 
     def visit(block: ContentBlock) -> None:
-        type_name = block.type  # type: ignore[attr-defined]
-        try:
-            found.add(BlockKind(type_name))
-        except ValueError:
-            pass
-        # Recurse into nested ToolResultBlock content
-        if type_name == "tool_result":
-            content = block.content  # type: ignore[attr-defined]
-            if not isinstance(content, str):
-                for nested in content:
-                    visit(nested)
+        if isinstance(block, TruncationBlock):
+            return  # runtime-only, not a model capability — skip at every depth
+        kinds.add(BlockKind(block.type))
+        if isinstance(block, ToolResultBlock) and isinstance(block.content, tuple):
+            for nested in block.content:
+                visit(nested)
 
-    for msg in messages:
-        for block in msg.content:
-            visit(block)
-
-    return frozenset(found)
+    for m in messages:
+        for b in m.content:
+            visit(b)
+    return frozenset(kinds)
 
 
 class FailFastCapabilityPolicy:

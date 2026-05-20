@@ -63,3 +63,39 @@ def test_fail_fast_policy_raises_on_unsupported():
 def test_fail_fast_policy_runtime_checkable():
     """CapabilityPolicy is a runtime Protocol."""
     assert isinstance(FailFastCapabilityPolicy(), CapabilityPolicy)
+
+
+def test_capability_check_skips_truncation_block_and_preserves_nested_recursion():
+    """Spec §5 (codex P1.3): _collect_block_kinds skips TruncationBlock at every
+    depth but PRESERVES recursion into ToolResultBlock.content (nested
+    image/audio/thinking still participate in accepts checks)."""
+    from lingyia_core import (
+        BlockKind, Message, Role, TextBlock, ToolResultBlock, ImageBlock,
+        TruncationBlock,
+    )
+    from lingyia_core.blocks import ImageSource
+    from lingyia_core.capability import _collect_block_kinds
+
+    messages = [
+        Message(role=Role.SYSTEM, content=(TruncationBlock(count=5),)),
+        Message(role=Role.USER, content=(TextBlock(text="search"),)),
+        Message(role=Role.USER, content=(
+            ToolResultBlock(
+                tool_use_id="t1",
+                content=(
+                    ImageBlock(source=ImageSource(url="https://example.com/img.png")),
+                    TruncationBlock(count=5),
+                ),
+            ),
+        )),
+    ]
+
+    kinds = _collect_block_kinds(messages)
+
+    assert BlockKind.TEXT in kinds
+    assert BlockKind.TOOL_RESULT in kinds
+    assert BlockKind.IMAGE in kinds, (
+        "Nested ImageBlock inside ToolResultBlock.content must participate in capability check"
+    )
+    # TruncationBlock skipped at every depth — does not contribute any kind
+    assert "truncation" not in {k.value for k in kinds}
