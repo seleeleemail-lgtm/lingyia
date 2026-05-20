@@ -29,12 +29,21 @@ Codex P2 fixes:
 from __future__ import annotations
 
 import re
+import warnings
 from copy import copy
 from typing import Callable, Optional
 
 from lingyia_core import RunState
 from lingyia_core.blocks import Role, TextBlock, ToolUseBlock, ToolResultBlock, TruncationBlock
 from lingyia_core.message import Message
+
+
+# Legacy v0.2.0-alpha text-encoded marker constants (transitional support;
+# targeted removal in v0.4 per spec §11.2). Detection is additive — both
+# the new TruncationBlock format and the legacy text form are recognized
+# by ``is_truncation_marker``. Each legacy parse emits a DeprecationWarning.
+_LEGACY_MARKER_PREFIX = "[lingyia:compactor-marker]"
+_LEGACY_MARKER_COUNT_RE = re.compile(r"earlier (\d+) messages")
 
 
 TokenEstimator = Callable[[str], int]
@@ -323,17 +332,20 @@ class TokenAwareCompactor:
 
     @staticmethod
     def is_truncation_marker(msg: Message) -> bool:
-        """Per spec §7.2 (codex P2.5): tightened predicate. Returns True only for
-        canonical new-format markers: Message(role=SYSTEM, content=(TruncationBlock,))
-        with exactly one element in content.
-
-        Legacy text-encoded marker detection is added back in Task 8 (deprecation path).
+        """Per spec §7.2: detect both canonical new-format markers and legacy
+        v0.2.0-alpha text-encoded markers (with DeprecationWarning side effect
+        in _parse_marker_count). Targeted removal: v0.4.x.
         """
         if msg.role != Role.SYSTEM:
             return False
-        if len(msg.content) != 1:
-            return False
-        return isinstance(msg.content[0], TruncationBlock)
+        # New format: SYSTEM + single TruncationBlock content
+        if len(msg.content) == 1 and isinstance(msg.content[0], TruncationBlock):
+            return True
+        # Legacy text-encoded marker (transitional)
+        for b in msg.content:
+            if isinstance(b, TextBlock) and b.text.startswith(_LEGACY_MARKER_PREFIX):
+                return True
+        return False
 
     @staticmethod
     def _make_truncation_marker(count: int) -> Message:
@@ -347,13 +359,28 @@ class TokenAwareCompactor:
 
     @staticmethod
     def _parse_marker_count(msg: Optional[Message]) -> int:
-        """Per spec §7.3: return count from TruncationBlock. Legacy text-marker
-        parsing is added back in Task 8."""
+        """Spec §7.3: prefer TruncationBlock.count; fall back to legacy text regex
+        with DeprecationWarning. Returns 0 if no parseable marker present.
+        """
         if msg is None:
             return 0
+        # Canonical
         for b in msg.content:
             if isinstance(b, TruncationBlock):
                 return b.count
+        # Legacy text marker (transitional, emit deprecation)
+        for b in msg.content:
+            if isinstance(b, TextBlock):
+                m = _LEGACY_MARKER_COUNT_RE.search(b.text)
+                if m:
+                    warnings.warn(
+                        "Loaded a v0.2.0-alpha text-encoded truncation marker. "
+                        "Next compact() will rewrite to TruncationBlock. "
+                        "Legacy text marker support will be removed in v0.4.",
+                        DeprecationWarning,
+                        stacklevel=2,
+                    )
+                    return int(m.group(1))
         return 0
 
     # ----- group construction ------------------------------------------

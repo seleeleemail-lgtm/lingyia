@@ -668,3 +668,65 @@ def test_is_truncation_marker_tightened_predicate():
 
     plain = Message(role=Role.SYSTEM, content=(TextBlock(text="System instructions"),))
     assert TokenAwareCompactor.is_truncation_marker(plain) is False
+
+
+def test_compactor_reads_legacy_text_marker_with_deprecation():
+    """Spec §7.3 backward-compat (codex P2.11): legacy text-encoded marker is
+    detected on load, a DeprecationWarning fires, and count is parsed correctly."""
+    import warnings
+    from lingyia_core import Role, Message, TextBlock
+    from lingyia_kit.compactors.token_aware import TokenAwareCompactor
+
+    legacy_marker = Message(
+        role=Role.SYSTEM,
+        content=(TextBlock(text="[lingyia:compactor-marker] earlier 17 messages truncated"),),
+    )
+
+    # Detection: predicate matches legacy form
+    assert TokenAwareCompactor.is_truncation_marker(legacy_marker) is True
+
+    # Parse: count = 17 AND DeprecationWarning fires
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        count = TokenAwareCompactor._parse_marker_count(legacy_marker)
+        assert count == 17
+        deprecations = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+        assert len(deprecations) >= 1, "Expected at least one DeprecationWarning"
+        msg = str(deprecations[0].message).lower()
+        assert "legacy" in msg or "alpha" in msg or "v0.2.0" in msg
+
+
+def test_compactor_legacy_marker_rewritten_on_next_compact():
+    """Spec §11.1: state with legacy text marker + new drops → output contains
+    TruncationBlock with cumulative count (legacy count + new drops)."""
+    from lingyia_core import RunState, Role, Message, TextBlock, TruncationBlock
+    from lingyia_kit.compactors.token_aware import TokenAwareCompactor, char_div4_estimator
+
+    legacy_marker = Message(
+        role=Role.SYSTEM,
+        content=(TextBlock(text="[lingyia:compactor-marker] earlier 5 messages truncated"),),
+    )
+    new_msgs = [Message(role=Role.USER, content=(TextBlock(text="y" * 30),)) for _ in range(10)]
+    state = RunState(messages=[legacy_marker] + new_msgs, run_id="legacy")
+
+    c = TokenAwareCompactor(
+        max_tokens=20, keep_last_turns=1, keep_recent_messages=2,
+        token_estimator=char_div4_estimator,
+    )
+
+    new_state = c.compact(state)
+
+    markers = [m for m in new_state.messages if TokenAwareCompactor.is_truncation_marker(m)]
+    assert len(markers) == 1
+
+    marker_block = markers[0].content[0]
+    assert isinstance(marker_block, TruncationBlock)
+    # Cumulative: legacy 5 + newly dropped (>=1 since compaction did drop messages)
+    assert marker_block.count >= 6, f"Cumulative count should be >= 6 (legacy 5 + drops), got {marker_block.count}"
+
+    # No legacy text marker remains
+    legacy_texts = [
+        m for m in new_state.messages
+        if any(isinstance(b, TextBlock) and b.text.startswith("[lingyia:compactor-marker]") for b in m.content)
+    ]
+    assert len(legacy_texts) == 0, "Legacy text marker should be replaced after compact()"
