@@ -195,6 +195,50 @@ async def test_tool_returning_truncation_block_in_output_raises():
         await runtime.arun(harness, "go")
 
 
+# ---------------------------------------------------------------------------
+# aresume validation (spec §6.3, codex P2.8) — placed before nested test below
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_aresume_rejects_truncation_block_in_pending_decision():
+    """Spec §6.3 (codex P2.8): aresume() validates interrupt.pending_decision.content
+    via shared helper before append/execute, closing checkpoint-injection vector."""
+    from lingyia_core import RunState
+    from lingyia_core.state import Interrupt, InterruptReason
+
+    class _Model:
+        capabilities = ModelCapabilities(
+            model_id="m",
+            accepts=frozenset({BlockKind.TEXT}),
+            emits=frozenset({BlockKind.TEXT}),
+        )
+
+        async def adecide(self, ctx, state, tools):
+            return Decision.final_answer("ok")
+
+    # Simulate a corrupted checkpoint: RunState with poisoned pending_decision.
+    poisoned_state = RunState(
+        messages=[Message(role=Role.USER, content=(TextBlock(text="go"),))],
+        run_id="r-poison",
+        interrupt=Interrupt(
+            reason=InterruptReason.APPROVAL,
+            message="approve pending action",
+            pending_decision=Decision(
+                kind=DecisionKind.FINAL_ANSWER,
+                content=(TruncationBlock(count=99),),  # POISONED
+            ),
+            iteration=1,
+        ),
+    )
+
+    runtime = Runtime.dev(_Model(), max_iterations=2)
+    harness = Harness()
+
+    with pytest.raises(CapabilityViolationError, match="TruncationBlock"):
+        await runtime.aresume(harness, poisoned_state, approved=True, feedback="")
+
+
 @pytest.mark.asyncio
 async def test_tool_returning_nested_truncation_block_raises():
     """Spec §6.2 (codex P2.7): _find_runtime_block recurses into nested

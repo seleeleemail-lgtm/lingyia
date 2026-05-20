@@ -389,6 +389,28 @@ class Runtime:
                 )
                 state.iteration += 1
                 return await self._continue(harness, state)
+            # Per spec §6.3 (codex P2.8): re-validate pending decision content
+            # via the shared :func:`_find_runtime_block` helper before append/
+            # execute. ``pending_decision`` may have been restored from a
+            # checkpoint (trust boundary); a corrupt or malicious snapshot
+            # could otherwise inject a TruncationBlock and bypass §6.1.
+            # Skipped on decline (approved=False) because the decision is
+            # about to be discarded, not appended.
+            offending = _find_runtime_block(interrupt.pending_decision.content)
+            if offending is not None:
+                capabilities = self.model.capabilities
+                raise CapabilityViolationError(
+                    emitted=frozenset(),
+                    declared=capabilities.emits,
+                    leaked=frozenset(),
+                    model_id=capabilities.model_id,
+                    reason=(
+                        f"Pending decision in checkpoint contains a "
+                        f"{type(offending).__name__}; runtime-authored block "
+                        "kinds cannot originate from checkpoint-restored "
+                        "decisions (spec §6.3)."
+                    ),
+                )
             # Approval granted: record the assistant turn (the pending tool
             # call) and run it, then continue the loop.
             state.messages.append(Message(
