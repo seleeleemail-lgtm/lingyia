@@ -359,29 +359,48 @@ class TokenAwareCompactor:
 
     @staticmethod
     def _parse_marker_count(msg: Optional[Message]) -> int:
-        """Spec §7.3: prefer TruncationBlock.count; fall back to legacy text regex
-        with DeprecationWarning. Returns 0 if no parseable marker present.
+        """Spec §7.3: parse marker count.
+
+        Prefer TruncationBlock.count; fall back to legacy text regex with
+        DeprecationWarning. For mixed markers (legacy text + TruncationBlock —
+        only possible from corrupted snapshots), return the MAX count from
+        either source to avoid silently losing the larger legacy count
+        (codex post-impl P2.2). DeprecationWarning still fires when legacy
+        text is present regardless of which source wins.
+
+        Returns 0 if no parseable marker present.
         """
         if msg is None:
             return 0
-        # Canonical
+
+        candidates: list[int] = []
+        has_legacy_text = False
+
+        # Canonical: TruncationBlock count
         for b in msg.content:
             if isinstance(b, TruncationBlock):
-                return b.count
-        # Legacy text marker (transitional, emit deprecation)
+                candidates.append(b.count)
+
+        # Legacy text marker fallback
         for b in msg.content:
             if isinstance(b, TextBlock):
                 m = _LEGACY_MARKER_COUNT_RE.search(b.text)
                 if m:
-                    warnings.warn(
-                        "Loaded a v0.2.0-alpha text-encoded truncation marker. "
-                        "Next compact() will rewrite to TruncationBlock. "
-                        "Legacy text marker support will be removed in v0.4.",
-                        DeprecationWarning,
-                        stacklevel=2,
-                    )
-                    return int(m.group(1))
-        return 0
+                    has_legacy_text = True
+                    candidates.append(int(m.group(1)))
+
+        # Emit DeprecationWarning if legacy text was found, regardless of which
+        # source wins (mixed corrupted snapshot still warrants the heads-up).
+        if has_legacy_text:
+            warnings.warn(
+                "Loaded a v0.2.0-alpha text-encoded truncation marker. "
+                "Next compact() will rewrite to TruncationBlock. "
+                "Legacy text marker support will be removed in v0.4.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+        return max(candidates) if candidates else 0
 
     # ----- group construction ------------------------------------------
 

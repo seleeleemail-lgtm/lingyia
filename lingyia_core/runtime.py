@@ -113,15 +113,24 @@ def _find_runtime_block(
     Currently the only runtime-authored block kind is TruncationBlock.
 
     Returns the first runtime-authored block found (for error reporting), or None.
-    Recurses into ToolResultBlock.content when it is a tuple of ContentBlocks.
+    Recurses into ToolResultBlock.content for ANY non-string iterable (codex
+    P2.1: ``Union[str, tuple[ContentBlock, ...]]`` is not enforced at runtime,
+    so a list could slip through and bypass §6.2 validation).
     """
     for b in content:
         if isinstance(b, TruncationBlock):
             return b
-        if isinstance(b, ToolResultBlock) and isinstance(b.content, tuple):
-            nested = _find_runtime_block(b.content)
-            if nested is not None:
-                return nested
+        if isinstance(b, ToolResultBlock):
+            inner = b.content
+            # Recurse if non-string iterable (tuple, list, or other Sequence-like)
+            if inner is not None and not isinstance(inner, str):
+                try:
+                    nested = _find_runtime_block(inner)
+                    if nested is not None:
+                        return nested
+                except TypeError:
+                    # inner is not iterable — defensive, shouldn't happen
+                    pass
     return None
 
 

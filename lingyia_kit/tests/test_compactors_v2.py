@@ -711,7 +711,8 @@ def test_compactor_legacy_marker_rewritten_on_next_compact():
         token_estimator=char_div4_estimator,
     )
 
-    new_state = c.compact(state)
+    with pytest.warns(DeprecationWarning, match="v0.2.0-alpha"):
+        new_state = c.compact(state)
 
     markers = [m for m in new_state.messages if TokenAwareCompactor.is_truncation_marker(m)]
     assert len(markers) == 1
@@ -727,3 +728,28 @@ def test_compactor_legacy_marker_rewritten_on_next_compact():
         if any(isinstance(b, TextBlock) and b.text.startswith("[lingyia:compactor-marker]") for b in m.content)
     ]
     assert len(legacy_texts) == 0, "Legacy text marker should be replaced after compact()"
+
+
+def test_compactor_parses_max_count_from_mixed_legacy_and_new_marker():
+    """Codex post-impl P2.2: corrupted SYSTEM message with BOTH legacy text marker
+    (count=100) AND TruncationBlock(count=1) returns max=100, not silently 1.
+    DeprecationWarning still fires."""
+    import warnings
+    from lingyia_core import Role, Message, TextBlock, TruncationBlock
+    from lingyia_kit.compactors.token_aware import TokenAwareCompactor
+
+    mixed = Message(
+        role=Role.SYSTEM,
+        content=(
+            TextBlock(text="[lingyia:compactor-marker] earlier 100 messages truncated"),
+            TruncationBlock(count=1),
+        ),
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        count = TokenAwareCompactor._parse_marker_count(mixed)
+
+    assert count == 100, f"Expected max(100, 1) = 100, got {count}"
+    deprecations = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+    assert len(deprecations) >= 1, "Expected DeprecationWarning even when TruncationBlock present"

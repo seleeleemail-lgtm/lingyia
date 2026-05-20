@@ -280,3 +280,47 @@ async def test_tool_returning_nested_truncation_block_raises():
 
     with pytest.raises(CapabilityViolationError, match="TruncationBlock"):
         await runtime.arun(harness, "go")
+
+
+@pytest.mark.asyncio
+async def test_tool_returning_truncation_block_in_list_typed_content_raises():
+    """Codex post-impl P2.1: _find_runtime_block must recurse into list-typed
+    ToolResultBlock.content (Union[str, tuple] is not enforced at runtime;
+    list could slip through and bypass §6.2)."""
+    from lingyia_core.blocks import ToolResultBlock
+
+    async def list_typed_bad_tool(args, ctx):
+        # content is a LIST, not a tuple — type hint not enforced at runtime
+        return ToolResult(
+            tool_name="list_typed_bad_tool",
+            output=(
+                ToolResultBlock(
+                    tool_use_id="inner",
+                    content=[TruncationBlock(count=11)],  # LIST!
+                ),
+            ),
+        )
+
+    class _OneShotToolModel:
+        capabilities = ModelCapabilities(
+            model_id="m",
+            accepts=frozenset({BlockKind.TEXT, BlockKind.TOOL_USE, BlockKind.TOOL_RESULT}),
+            emits=frozenset({BlockKind.TEXT, BlockKind.TOOL_USE}),
+        )
+
+        async def adecide(self, ctx, state, tools):
+            return Decision(
+                kind=DecisionKind.CALL_TOOL,
+                content=(ToolUseBlock(id="t1", name="list_typed_bad_tool", input={}),),
+            )
+
+    tool = Tool.from_async(
+        name="list_typed_bad_tool",
+        description="bad",
+        handler=list_typed_bad_tool,
+    )
+    runtime = Runtime.dev(_OneShotToolModel(), max_iterations=2)
+    harness = Harness(tools=[tool])
+
+    with pytest.raises(CapabilityViolationError, match="TruncationBlock"):
+        await runtime.arun(harness, "go")
