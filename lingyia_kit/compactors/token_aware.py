@@ -33,7 +33,7 @@ from copy import copy
 from typing import Callable, Optional
 
 from lingyia_core import RunState
-from lingyia_core.blocks import Role, TextBlock, ToolUseBlock, ToolResultBlock
+from lingyia_core.blocks import Role, TextBlock, ToolUseBlock, ToolResultBlock, TruncationBlock
 from lingyia_core.message import Message
 
 
@@ -257,8 +257,15 @@ class TokenAwareCompactor:
         prior_count = self._parse_marker_count(prior_marker)
 
         def _marker_cost(extra_drops: int) -> int:
+            # Spec §4.1: TruncationBlock.__post_init__ rejects count <= 0.
+            # Guard the estimation path so a hypothetical "no drops yet"
+            # call (prior_count=0, extra_drops=0) doesn't construct an
+            # invalid block during budget reservation.
+            count = prior_count + extra_drops
+            if count <= 0:
+                return 0
             return _estimate_message_tokens(
-                self._make_truncation_marker(prior_count + extra_drops),
+                self._make_truncation_marker(count),
                 self.token_estimator,
             )
 
@@ -316,48 +323,37 @@ class TokenAwareCompactor:
 
     @staticmethod
     def is_truncation_marker(msg: Message) -> bool:
-        """True iff ``msg`` is a compactor-inserted truncation marker.
+        """Per spec §7.2 (codex P2.5): tightened predicate. Returns True only for
+        canonical new-format markers: Message(role=SYSTEM, content=(TruncationBlock,))
+        with exactly one element in content.
 
-        Identified by Role.SYSTEM + a TextBlock whose text begins with the
-        sentinel prefix. We deliberately use a content sentinel (vs a
-        side-channel field) because ``Message`` is a frozen-ish dataclass
-        and round-trips through JSON serialization; the sentinel survives
-        a save/load cycle so subsequent compactions can find it.
+        Legacy text-encoded marker detection is added back in Task 8 (deprecation path).
         """
         if msg.role != Role.SYSTEM:
             return False
-        for b in msg.content:
-            if isinstance(b, TextBlock) and b.text.startswith(_TRUNCATION_MARKER_PREFIX):
-                return True
-        return False
+        if len(msg.content) != 1:
+            return False
+        return isinstance(msg.content[0], TruncationBlock)
 
     @staticmethod
-    def _make_truncation_marker(dropped_count: int) -> Message:
-        text = (
-            f"{_TRUNCATION_MARKER_PREFIX} "
-            f"[earlier {dropped_count} messages truncated to save context]"
+    def _make_truncation_marker(count: int) -> Message:
+        """Per spec §7.1: emit Message(SYSTEM, (TruncationBlock(count),)).
+        No longer text-encoded. Caller MUST ensure count > 0 (enforced by
+        TruncationBlock.__post_init__)."""
+        return Message(
+            role=Role.SYSTEM,
+            content=(TruncationBlock(count=count),),
         )
-        return Message(role=Role.SYSTEM, content=(TextBlock(text=text),))
 
     @staticmethod
-    def _parse_marker_count(marker: Optional[Message]) -> int:
-        """Recover the prior marker's cumulative dropped-count.
-
-        Returns 0 if ``marker`` is None or its text doesn't match the
-        expected ``earlier N messages truncated`` format. We deliberately
-        don't raise on a corrupted/hand-edited marker — losing the
-        accumulator is preferable to crashing the compactor mid-run.
-        """
-        if marker is None:
+    def _parse_marker_count(msg: Optional[Message]) -> int:
+        """Per spec §7.3: return count from TruncationBlock. Legacy text-marker
+        parsing is added back in Task 8."""
+        if msg is None:
             return 0
-        for b in marker.content:
-            if isinstance(b, TextBlock):
-                m = _MARKER_COUNT_RE.search(b.text)
-                if m:
-                    try:
-                        return int(m.group(1))
-                    except ValueError:
-                        return 0
+        for b in msg.content:
+            if isinstance(b, TruncationBlock):
+                return b.count
         return 0
 
     # ----- group construction ------------------------------------------

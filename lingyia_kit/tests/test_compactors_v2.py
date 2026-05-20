@@ -624,3 +624,47 @@ def test_non_monotonic_estimator_is_best_effort_per_contract():
     # crashed. We deliberately do NOT assert ``total <= max_tokens``
     # because the estimator violates monotonicity.
     assert isinstance(total, int)
+
+
+def test_compactor_emits_truncation_block_not_text():
+    """Spec §7.1: new compaction emits Message(SYSTEM, (TruncationBlock,)), not text marker."""
+    from lingyia_core import RunState, Role, Message, TextBlock, TruncationBlock
+    from lingyia_kit.compactors.token_aware import TokenAwareCompactor, char_div4_estimator
+
+    msgs = [Message(role=Role.USER, content=(TextBlock(text="x" * 50),)) for _ in range(40)]
+    state = RunState(messages=msgs, run_id="x")
+
+    c = TokenAwareCompactor(
+        max_tokens=50, keep_last_turns=1, keep_recent_messages=2,
+        token_estimator=char_div4_estimator,
+    )
+    new_state = c.compact(state)
+
+    markers = [m for m in new_state.messages if TokenAwareCompactor.is_truncation_marker(m)]
+    assert len(markers) == 1, f"Expected exactly one marker, got {len(markers)}"
+
+    marker_msg = markers[0]
+    assert marker_msg.role == Role.SYSTEM
+    assert len(marker_msg.content) == 1
+    assert isinstance(marker_msg.content[0], TruncationBlock)
+    assert marker_msg.content[0].count > 0
+    assert not isinstance(marker_msg.content[0], TextBlock)
+
+
+def test_is_truncation_marker_tightened_predicate():
+    """Spec §7.2 (codex P2.5): predicate requires SYSTEM role AND single-block
+    TruncationBlock tuple. Other shapes return False."""
+    from lingyia_core import Role, Message, TextBlock, TruncationBlock
+    from lingyia_kit.compactors.token_aware import TokenAwareCompactor
+
+    canonical = Message(role=Role.SYSTEM, content=(TruncationBlock(count=3),))
+    assert TokenAwareCompactor.is_truncation_marker(canonical) is True
+
+    user_with_block = Message(role=Role.USER, content=(TruncationBlock(count=3),))
+    assert TokenAwareCompactor.is_truncation_marker(user_with_block) is False
+
+    mixed = Message(role=Role.SYSTEM, content=(TextBlock(text="hi"), TruncationBlock(count=3)))
+    assert TokenAwareCompactor.is_truncation_marker(mixed) is False
+
+    plain = Message(role=Role.SYSTEM, content=(TextBlock(text="System instructions"),))
+    assert TokenAwareCompactor.is_truncation_marker(plain) is False
