@@ -106,3 +106,54 @@ def test_recursive_tool_result_depth_limit():
         block = ToolResultBlock(tool_use_id="x", content=(block,))
     with pytest.raises(ValueError, match="content depth exceeds 8"):
         block_to_dict(block)
+
+
+def test_truncation_block_construction_rejects_zero_and_negative():
+    """Spec §4.1 (codex P2.6): __post_init__ enforces count > 0."""
+    from lingyia_core import TruncationBlock
+
+    with pytest.raises(ValueError, match="positive integer"):
+        TruncationBlock(count=0)
+
+    with pytest.raises(ValueError, match="positive integer"):
+        TruncationBlock(count=-1)
+
+    b = TruncationBlock(count=1)
+    assert b.count == 1
+    assert b.type == "truncation"
+
+
+def test_truncation_block_to_dict_from_dict_round_trip():
+    """Spec §4.4: block_to_dict / block_from_dict preserve TruncationBlock."""
+    from lingyia_core import TruncationBlock
+    from lingyia_core.blocks import block_to_dict, block_from_dict
+
+    original = TruncationBlock(count=42)
+    serialized = block_to_dict(original)
+    assert serialized == {"type": "truncation", "count": 42}
+
+    restored = block_from_dict(serialized)
+    assert isinstance(restored, TruncationBlock)
+    assert restored.count == 42
+    assert restored == original
+
+
+def test_truncation_block_in_content_block_union():
+    """Spec §4.2: TruncationBlock is a member of ContentBlock union."""
+    import typing
+
+    from lingyia_core import TruncationBlock
+    from lingyia_core.blocks import ContentBlock
+
+    args = typing.get_args(ContentBlock)
+    assert TruncationBlock in args, (
+        f"TruncationBlock must be in ContentBlock union; got {args}"
+    )
+
+
+def test_unknown_block_type_in_dict_raises_unknown_block_type_error():
+    """Spec §4.4 (T3): block_from_dict remains closed. Unknown 'type' raises."""
+    from lingyia_core.blocks import block_from_dict, UnknownBlockTypeError
+
+    with pytest.raises(UnknownBlockTypeError, match="citation"):
+        block_from_dict({"type": "citation", "text": "RFC 8259"})

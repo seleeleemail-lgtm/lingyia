@@ -97,6 +97,29 @@ class ThinkingBlock:
 
 
 @dataclass(frozen=True)
+class TruncationBlock:
+    """Runtime-authored marker indicating prior messages were dropped during compaction.
+
+    Compactor-authored only. Flattened to text by adapters before sending to LLM
+    providers. Not a model capability — does NOT appear in BlockKind enum or
+    ModelCapabilities.{accepts,emits}.
+
+    Attributes:
+        count: Cumulative count of messages dropped across all compactions since
+            the start of this conversation. Monotonically non-decreasing. MUST
+            be a positive integer (count > 0).
+    """
+    count: int
+    type: Literal["truncation"] = "truncation"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.count, int) or self.count <= 0:
+            raise ValueError(
+                f"TruncationBlock.count must be a positive integer, got {self.count!r}"
+            )
+
+
+@dataclass(frozen=True)
 class ToolResultBlock:
     """Result of a tool execution.
 
@@ -113,6 +136,7 @@ class ToolResultBlock:
 ContentBlock = Union[
     TextBlock, ToolUseBlock, ToolResultBlock,
     ImageBlock, AudioBlock, ThinkingBlock,
+    TruncationBlock,
 ]
 
 
@@ -156,6 +180,8 @@ def block_to_dict(block: ContentBlock, _depth: int = 0) -> dict[str, Any]:
         }
     if isinstance(block, ThinkingBlock):
         return {"type": "thinking", "thinking": block.thinking, "signature": block.signature}
+    if isinstance(block, TruncationBlock):
+        return {"type": "truncation", "count": block.count}
 
     raise TypeError(f"unknown ContentBlock subtype: {type(block).__name__}")
 
@@ -221,5 +247,10 @@ def block_from_dict(data: Mapping[str, Any], _depth: int = 0) -> ContentBlock:
             thinking=data["thinking"],
             signature=data.get("signature", ""),
         )
+
+    if block_type == "truncation":
+        if "count" not in data:
+            raise ValueError("missing required field: count")
+        return TruncationBlock(count=int(data["count"]))
 
     raise UnknownBlockTypeError(f"unknown block type: {block_type!r}")
