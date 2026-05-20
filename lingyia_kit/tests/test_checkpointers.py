@@ -34,6 +34,7 @@ from lingyia_core.blocks import (
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
+    TruncationBlock,
 )
 from lingyia_core.message import Message
 from lingyia_core.state import RUN_STATE_SCHEMA_VERSION, UnknownSchemaVersionError
@@ -296,6 +297,42 @@ class SqliteCheckpointerTests(unittest.TestCase):
             ck.close()
 
         asyncio.run(go())
+
+    def test_truncation_block_round_trip_via_sqlite_checkpointer(self):
+        """Spec §12 test #18 (codex P2.12): real SqliteCheckpointer asave/aload
+        preserves TruncationBlock through JSON encoding, schema storage, and
+        load behavior."""
+        async def go(db_path):
+            ck = SqliteCheckpointer(db_path)
+            original = RunState(
+                messages=[
+                    Message(role=Role.SYSTEM, content=(TruncationBlock(count=17),)),
+                    Message(role=Role.USER, content=(TextBlock(text="continue"),)),
+                ],
+                run_id="t-sqlite-roundtrip",
+                iteration=5,
+            )
+            await ck.asave(original.run_id, original)
+            loaded = await ck.aload("t-sqlite-roundtrip")
+            ck.close()
+            return loaded
+
+        with tempfile.TemporaryDirectory() as d:
+            db_path = Path(d) / "checkpoints.db"
+            loaded = asyncio.run(go(db_path))
+
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded.run_id, "t-sqlite-roundtrip")
+        self.assertEqual(loaded.iteration, 5)
+        self.assertEqual(len(loaded.messages), 2)
+
+        marker = loaded.messages[0].content[0]
+        self.assertIsInstance(marker, TruncationBlock)
+        self.assertEqual(marker.count, 17)
+
+        user_text = loaded.messages[1].content[0]
+        self.assertIsInstance(user_text, TextBlock)
+        self.assertEqual(user_text.text, "continue")
 
     def test_runtime_pause_save_resume_in_new_runtime(self):
         """End-to-end: Runtime A pauses, we checkpoint, Runtime B resumes.

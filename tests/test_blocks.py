@@ -157,3 +157,31 @@ def test_unknown_block_type_in_dict_raises_unknown_block_type_error():
 
     with pytest.raises(UnknownBlockTypeError, match="citation"):
         block_from_dict({"type": "citation", "text": "RFC 8259"})
+
+
+def test_truncation_block_round_trip_to_dict_from_dict_via_runstate():
+    """Spec §12 test #17 (codex P2.12 split): pure serialization round-trip
+    preserves TruncationBlock in RunState."""
+    from lingyia_core import (
+        RunState, Role, Message, TextBlock, TruncationBlock,
+    )
+
+    state = RunState(
+        messages=[
+            Message(role=Role.SYSTEM, content=(TruncationBlock(count=42),)),
+            Message(role=Role.USER, content=(TextBlock(text="hello"),)),
+        ],
+        run_id="t-roundtrip",
+        iteration=3,
+    )
+
+    d = state.to_dict()
+    restored = RunState.from_dict(d)
+
+    assert restored.run_id == "t-roundtrip"
+    assert restored.iteration == 3
+    assert len(restored.messages) == 2
+
+    marker = restored.messages[0].content[0]
+    assert isinstance(marker, TruncationBlock)
+    assert marker.count == 42
