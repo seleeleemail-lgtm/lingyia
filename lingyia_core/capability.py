@@ -76,11 +76,18 @@ class CapabilityViolationError(RuntimeError):
         declared: frozenset[BlockKind],
         leaked: frozenset[BlockKind],
         model_id: str,
+        reason: str | None = None,
     ) -> None:
         self.emitted = emitted
         self.declared = declared
         self.leaked = leaked
         self.model_id = model_id
+        if reason is not None:
+            # Caller supplied a domain-specific message (e.g. runtime-authored
+            # block leaked from model output — spec §6.1). Keep model_id in
+            # the message so failures stay attributable.
+            super().__init__(f"Model {model_id!r}: {reason}")
+            return
         leaked_list = sorted(b.value for b in leaked)
         declared_list = sorted(b.value for b in declared)
         super().__init__(

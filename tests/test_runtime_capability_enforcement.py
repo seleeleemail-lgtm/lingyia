@@ -14,6 +14,7 @@ import pytest
 
 from lingyia_core import (
     Decision,
+    DecisionKind,
     Harness,
     Runtime,
     Tool,
@@ -25,6 +26,7 @@ from lingyia_core.blocks import (
     TextBlock,
     ThinkingBlock,
     ToolUseBlock,
+    TruncationBlock,
 )
 from lingyia_core.capability import (
     CapabilityMismatchError,
@@ -119,3 +121,34 @@ def test_runtime_accepts_decision_within_emits():
     harness = Harness(tools=[])
     result = asyncio.run(rt.arun(harness, "hi"))
     assert result.summary == "ok"
+
+
+# ---------------------------------------------------------------------------
+# runtime-authored block rejection (spec §6.1, codex P1.1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_model_emitting_truncation_block_raises_before_enforce_emits():
+    """Spec §6.1 (codex P1.1): _validate_no_runtime_blocks_from_model runs BEFORE
+    _enforce_emits, so model-emitted TruncationBlock raises CapabilityViolationError
+    (not ValueError from BlockKind('truncation'))."""
+
+    class _RuntimeBlockEmittingModel:
+        capabilities = ModelCapabilities(
+            model_id="bad-model",
+            accepts=frozenset({BlockKind.TEXT}),
+            emits=frozenset({BlockKind.TEXT}),
+        )
+
+        async def adecide(self, ctx, state, tools):
+            return Decision(
+                kind=DecisionKind.FINAL_ANSWER,
+                content=(TruncationBlock(count=5),),
+            )
+
+    runtime = Runtime.dev(_RuntimeBlockEmittingModel(), max_iterations=1)
+    harness = Harness()
+
+    with pytest.raises(CapabilityViolationError, match="TruncationBlock"):
+        await runtime.arun(harness, "hello")

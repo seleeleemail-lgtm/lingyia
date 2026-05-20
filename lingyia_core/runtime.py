@@ -454,6 +454,14 @@ class Runtime:
                     reason=f"model error: {exc}",
                 )
 
+            # Runtime-authored block rejection (spec §6.1, codex P1.1): a
+            # model MUST NOT emit blocks the runtime owns (currently
+            # TruncationBlock — see _find_runtime_block). This MUST run
+            # before _enforce_emits, because BlockKind() does not know
+            # runtime-authored kinds and would otherwise raise ValueError
+            # first, masking the true origin of the violation.
+            self._validate_no_runtime_blocks_from_model(decision)
+
             # Capability check (output direction, spec §16): the model must
             # only emit block kinds it declared in capabilities.emits. This
             # catches adapter bugs (e.g. a non-Anthropic model returning a
@@ -779,6 +787,36 @@ class Runtime:
                 f"ModelCapabilities instance, got {type(caps).__name__}."
             )
         return caps
+
+    def _validate_no_runtime_blocks_from_model(self, decision: Decision) -> None:
+        """Per spec §6.1 (codex P1.1): reject runtime-authored blocks in model output.
+
+        MUST run BEFORE ``_enforce_emits``, because ``_enforce_emits`` calls
+        ``BlockKind(block.type)`` on every block, and runtime-authored kinds
+        like ``'truncation'`` are intentionally NOT in ``BlockKind`` (spec §5,
+        decision 5: ``TruncationBlock`` is compactor-authored, not a model
+        capability). Without this pre-check, ``_enforce_emits`` would convert
+        the resulting ``ValueError`` into a generic "unknown block" error that
+        does not attribute the violation to runtime-authored origin.
+
+        Uses the shared :func:`_find_runtime_block` helper so detection logic
+        stays in one place across model output (§6.1), tool results (§6.2),
+        and approval-resume (§6.3).
+        """
+        offending = _find_runtime_block(decision.content)
+        if offending is None:
+            return
+        capabilities = self.model.capabilities
+        raise CapabilityViolationError(
+            emitted=frozenset(),
+            declared=capabilities.emits,
+            leaked=frozenset(),
+            model_id=capabilities.model_id,
+            reason=(
+                f"emitted a {type(offending).__name__}; runtime-authored "
+                "block kinds cannot originate from model output (spec §6.1)."
+            ),
+        )
 
     @staticmethod
     def _enforce_emits(decision: Decision, capabilities: ModelCapabilities) -> None:
