@@ -152,3 +152,87 @@ async def test_model_emitting_truncation_block_raises_before_enforce_emits():
 
     with pytest.raises(CapabilityViolationError, match="TruncationBlock"):
         await runtime.arun(harness, "hello")
+
+
+# ---------------------------------------------------------------------------
+# tool result validation (spec §6.2, codex P1.2 + P2.7)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tool_returning_truncation_block_in_output_raises():
+    """Spec §6.2 (codex P1.2): tool returning (TruncationBlock,) as output raises
+    CapabilityViolationError via _validate_tool_result after _serialize_tool_output."""
+
+    async def bad_tool(args, ctx):
+        return ToolResult(
+            tool_name="bad_tool",
+            output=(TruncationBlock(count=3),),
+        )
+
+    class _OneShotToolModel:
+        capabilities = ModelCapabilities(
+            model_id="m",
+            accepts=frozenset({BlockKind.TEXT, BlockKind.TOOL_USE, BlockKind.TOOL_RESULT}),
+            emits=frozenset({BlockKind.TEXT, BlockKind.TOOL_USE}),
+        )
+
+        async def adecide(self, ctx, state, tools):
+            return Decision(
+                kind=DecisionKind.CALL_TOOL,
+                content=(ToolUseBlock(id="t1", name="bad_tool", input={}),),
+            )
+
+    tool = Tool.from_async(
+        name="bad_tool",
+        description="bad",
+        handler=bad_tool,
+    )
+    runtime = Runtime.dev(_OneShotToolModel(), max_iterations=2)
+    harness = Harness(tools=[tool])
+
+    with pytest.raises(CapabilityViolationError, match="TruncationBlock"):
+        await runtime.arun(harness, "go")
+
+
+@pytest.mark.asyncio
+async def test_tool_returning_nested_truncation_block_raises():
+    """Spec §6.2 (codex P2.7): _find_runtime_block recurses into nested
+    ToolResultBlock.content. Tool returning ToolResultBlock(content=(TruncationBlock,))
+    is caught by the recursive helper."""
+    from lingyia_core.blocks import ToolResultBlock
+
+    async def nested_bad_tool(args, ctx):
+        return ToolResult(
+            tool_name="nested_bad_tool",
+            output=(
+                ToolResultBlock(
+                    tool_use_id="inner",
+                    content=(TruncationBlock(count=7),),
+                ),
+            ),
+        )
+
+    class _OneShotToolModel:
+        capabilities = ModelCapabilities(
+            model_id="m",
+            accepts=frozenset({BlockKind.TEXT, BlockKind.TOOL_USE, BlockKind.TOOL_RESULT}),
+            emits=frozenset({BlockKind.TEXT, BlockKind.TOOL_USE}),
+        )
+
+        async def adecide(self, ctx, state, tools):
+            return Decision(
+                kind=DecisionKind.CALL_TOOL,
+                content=(ToolUseBlock(id="t1", name="nested_bad_tool", input={}),),
+            )
+
+    tool = Tool.from_async(
+        name="nested_bad_tool",
+        description="bad",
+        handler=nested_bad_tool,
+    )
+    runtime = Runtime.dev(_OneShotToolModel(), max_iterations=2)
+    harness = Harness(tools=[tool])
+
+    with pytest.raises(CapabilityViolationError, match="TruncationBlock"):
+        await runtime.arun(harness, "go")

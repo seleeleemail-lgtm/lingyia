@@ -678,6 +678,12 @@ class Runtime:
         for call, result in zip(ordered_calls, results):
             if result.ok:
                 content = self._serialize_tool_output(result.output)
+                # Spec §6.2 (codex P1.2 + P2.7): validate per-call AFTER
+                # serialization so the tuple has survived (TruncationBlock is
+                # in the serializer allowlist per Task 3). Validation runs
+                # inside the zip loop so each parallel tool call gets its
+                # own attributed error.
+                self._validate_tool_result(content, call.name)
             else:
                 content = result.error or "tool error"
             result_blocks.append(ToolResultBlock(
@@ -815,6 +821,39 @@ class Runtime:
             reason=(
                 f"emitted a {type(offending).__name__}; runtime-authored "
                 "block kinds cannot originate from model output (spec §6.1)."
+            ),
+        )
+
+    def _validate_tool_result(
+        self,
+        serialized: Union[str, tuple[ContentBlock, ...]],
+        tool_name: str,
+    ) -> None:
+        """Per spec §6.2 (codex P1.2 + P2.7): reject TruncationBlock anywhere in
+        serialized tool output. Recurses through nested ``ToolResultBlock.content``
+        via the shared :func:`_find_runtime_block` helper.
+
+        Operates on the SERIALIZED output (after :meth:`_serialize_tool_output`),
+        so the tuple has survived serialization. Per spec §13.1 step 4 the
+        serializer allowlist includes ``TruncationBlock`` (Task 3) precisely so
+        buggy tools don't bypass this check via stringification.
+        """
+        if not isinstance(serialized, tuple):
+            # Plain string or other shapes cannot carry runtime ContentBlocks.
+            return
+        offending = _find_runtime_block(serialized)
+        if offending is None:
+            return
+        capabilities = self.model.capabilities
+        raise CapabilityViolationError(
+            emitted=frozenset(),
+            declared=capabilities.emits,
+            leaked=frozenset(),
+            model_id=capabilities.model_id,
+            reason=(
+                f"tool {tool_name!r} returned a {type(offending).__name__}; "
+                "runtime-authored block kinds cannot originate from tool "
+                "output (spec §6.2)."
             ),
         )
 
