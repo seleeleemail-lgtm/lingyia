@@ -24,7 +24,7 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional, Sequence, Union
 
-from .blocks import Role, TextBlock, ToolResultBlock, ToolUseBlock
+from .blocks import ContentBlock, Role, TextBlock, ToolResultBlock, ToolUseBlock, TruncationBlock
 from .capability import (
     CapabilityPolicy,
     CapabilityViolationError,
@@ -97,6 +97,32 @@ def _default_context_builder(state: RunState, tools: Sequence[Tool]) -> Mapping[
         ],
         "metadata": dict(state.metadata),
     }
+
+
+def _find_runtime_block(
+    content: Sequence[ContentBlock],
+) -> Optional[ContentBlock]:
+    """Recursively scan a ContentBlock sequence for runtime-authored blocks.
+
+    Per spec §6.0 (codex P2.7): single source of truth for runtime-authored
+    block detection. Used by:
+      - Model output validation (§6.1, Task 4)
+      - Tool result validation (§6.2, Task 5)
+      - Approval-resume validation (§6.3, Task 6)
+
+    Currently the only runtime-authored block kind is TruncationBlock.
+
+    Returns the first runtime-authored block found (for error reporting), or None.
+    Recurses into ToolResultBlock.content when it is a tuple of ContentBlocks.
+    """
+    for b in content:
+        if isinstance(b, TruncationBlock):
+            return b
+        if isinstance(b, ToolResultBlock) and isinstance(b.content, tuple):
+            nested = _find_runtime_block(b.content)
+            if nested is not None:
+                return nested
+    return None
 
 
 def _default_guard(decision: Decision, state: RunState) -> GuardResult:
@@ -681,6 +707,7 @@ class Runtime:
             ThinkingBlock,
             ToolResultBlock,
             ToolUseBlock,
+            TruncationBlock,
         )
 
         if payload is None:
@@ -690,9 +717,13 @@ class Runtime:
         # tuple[ContentBlock, ...] passthrough — preserves rich tool output
         # so adapters can render multiple text/image parts in a single
         # tool_result. Anything in the v0.2 ContentBlock union qualifies.
+        # TruncationBlock is included so runtime-authored emissions from
+        # buggy tools survive serialization and are caught by §6.2 validation
+        # (Task 5) rather than getting silently stringified to JSON.
         if isinstance(payload, tuple) and payload and all(
             isinstance(b, (TextBlock, ToolUseBlock, ToolResultBlock,
-                           ImageBlock, AudioBlock, ThinkingBlock))
+                           ImageBlock, AudioBlock, ThinkingBlock,
+                           TruncationBlock))
             for b in payload
         ):
             return payload
