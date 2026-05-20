@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0-beta1a] - 2026-05-20 — TruncationBlock + Compactor Refactor
+
+### BREAKING CHANGES (alpha → alpha; no stable users impacted)
+- `Compactor` truncation marker is now `TruncationBlock(count: int)` instead of a text-encoded SYSTEM message. v0.2.0-alpha snapshots remain readable for one transitional version (DeprecationWarning fires on legacy parse; removed in v0.4.x).
+
+### Added
+- `lingyia_core.TruncationBlock` — runtime-authored ContentBlock with `count: int` and `type: Literal["truncation"]`. `__post_init__` enforces `count > 0`. Re-exported from `lingyia_core`.
+- `lingyia_core.runtime._find_runtime_block` — shared recursive helper used by model output / tool result / approval-resume validation. Returns first runtime-authored block found anywhere in a ContentBlock sequence (recurses into `ToolResultBlock.content`).
+- Runtime validations (3 paths):
+  - `_validate_no_runtime_blocks_from_model` — runs BEFORE `_enforce_emits`. Rejects model output containing TruncationBlock with `CapabilityViolationError`.
+  - `_validate_tool_result` — runs after `_serialize_tool_output`. Rejects tool emissions containing TruncationBlock (top-level or nested in `ToolResultBlock.content`).
+  - `aresume` pending-decision validation — re-validates `interrupt.pending_decision.content` before append/execute. Closes checkpoint-injection vector.
+- Adapter projection helpers:
+  - OpenAI base `_project_role_blocks` + `_truncation_to_text` — splits a Message's content around TruncationBlock, emitting it as a separate system wire entry.
+  - Anthropic `_project_system_message` + `_build_system_payload` — joins TextBlock + TruncationBlock content for the Anthropic system payload.
+- `TruncationBlock` added to `_serialize_tool_output` allowlist so tool emissions survive serialization (allows §6.2 validation to catch).
+- `CapabilityViolationError` constructor accepts optional `reason=` kwarg for clearer attribution.
+
+### Changed
+- `lingyia_core.capability._collect_block_kinds` — preserves nested `ToolResultBlock.content` recursion; skips `TruncationBlock` at every depth (codex P1.3). Unknown block kinds now raise (contract tightening — previously silent try/except).
+- `TokenAwareCompactor._make_truncation_marker` — emits `Message(SYSTEM, (TruncationBlock(count),))` instead of text marker.
+- `TokenAwareCompactor.is_truncation_marker` — tightened to canonical predicate (SYSTEM role + single TruncationBlock content tuple) plus legacy text-marker detection (transitional, removal in v0.4).
+- `_serialize_tool_output` — block-class allowlist extended to preserve TruncationBlock tuples.
+
+### Deprecated
+- Legacy text-encoded truncation markers (`Message(SYSTEM, (TextBlock("[lingyia:compactor-marker] earlier N messages truncated"),))`). Emits `DeprecationWarning` on parse. Hard removal target: v0.4.x. v0.4.x semantics: legacy text remains as ordinary SYSTEM text (compactor preserves SYSTEM messages); new compactions accumulate cumulative count fresh from 0.
+
+### Documentation
+- `ContentBlock` semantic widened: now means "transcript-projectable content" (includes runtime-authored blocks), not "model-native content only". Documented in spec §3 decision 4.
+- Sub-agent tool contract explicit (spec §15): sub-agent results MUST NOT expose child `RunState.messages` as `ContentBlock` instances to parent runtime. Current `sub_agent_tool` returns only primitive dict fields (summary/status/iterations/cost_usd/tokens/run_id) — contract verified in Task 13.
+
+### Testing
+- 19 new regression tests added across:
+  - `tests/test_blocks.py` (5 tests: construction guards, dict serialization, union membership, RunState roundtrip, unknown-block-type)
+  - `tests/test_capability.py` (1 test: recursion preservation + TruncationBlock skip)
+  - `tests/test_runtime_capability_enforcement.py` (4 tests: model output before _enforce_emits, tool top-level, tool nested, approval resume)
+  - `lingyia_kit/tests/test_compactors_v2.py` (4 tests: emit shape, tightened predicate, legacy parse with deprecation, legacy rewrite cumulative)
+  - `lingyia_kit/tests/test_openai_adapter.py` (2 tests: flatten + mixed-content order)
+  - `lingyia_kit/tests/test_anthropic_adapter.py` (2 tests: flatten + mixed-content order)
+  - `lingyia_kit/tests/test_checkpointers.py` (1 test: real Sqlite asave/aload round-trip)
+- 3 existing compactor tests updated to TruncationBlock-based assertions.
+- Test count: 174 → 193 passing.
+
+### Migration
+- ai-agent backend: bumping pin to the v0.2.0-β1a tag. No code changes required (uses public `is_truncation_marker` API). Existing v0.2.0-alpha checkpoints continue to load; first compaction transparently rewrites legacy text markers to `TruncationBlock` (with one DeprecationWarning).
+
+### Known Limitations
+- Concurrent compaction on the same `run_id` is best-effort under v0.2.0-β1a (SqliteCheckpointer uses last-writer-wins). Optimistic versioning / CAS planned for v0.2.0-β1c alongside session API contract.
+- Per spec §10, β1b streaming layer must reference the locked forward contract: TruncationBlock NEVER emits `text_delta` events; compaction emits one optional structured event after `compacted` telemetry.
+
+### Spec / Plan References
+- Spec: `docs/superpowers/specs/2026-05-19-v0.2.0-beta1a-truncation-block-design.md`
+- Plan: `docs/superpowers/plans/2026-05-19-v0.2.0-beta1a-truncation-block-implementation.md`
+- Review history: 2 codex review rounds + 1 verify pass; APPROVE_WITH_REVISIONS (14 findings) → APPROVE_WITH_TWEAKS (4 verify items) → all addressed.
+
 ### Roadmap
 - Inspect AI bridge runner (200+ external benchmarks)
 - Reflection / replan agent pattern
